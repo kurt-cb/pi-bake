@@ -127,6 +127,8 @@ def _cmd_build(args: argparse.Namespace) -> int:
         wifi_country=args.wifi_country,
         timezone=args.timezone,
         extra_pubkeys=extra_pubkeys,
+        static_ipv4=args.static_v4 or "",
+        gateway_ipv4=args.gateway_v4 or "",
     )
 
     try:
@@ -204,6 +206,11 @@ def _build_parser() -> argparse.ArgumentParser:
                      help="bootstrap WiFi PSK (omit for wired-only)")
     p_b.add_argument("--wifi-country", default="US",
                      help="regulatory domain (default: US)")
+    p_b.add_argument("--static-v4", dest="static_v4", metavar="CIDR",
+                     help="eth0 static IPv4 (e.g. 192.168.4.111/24); "
+                          "if set, --gateway-v4 must be too. Omit for DHCP.")
+    p_b.add_argument("--gateway-v4", dest="gateway_v4",
+                     help="eth0 IPv4 default gateway (required with --static-v4)")
     p_b.add_argument("--timezone", default="UTC",
                      help="default: UTC")
     p_b.add_argument("--image-size-mb", type=int,

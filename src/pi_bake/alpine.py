@@ -188,15 +188,24 @@ def _write_apkovl(out: Path, node: NodeConfig) -> None:
     members.append(("root/.ssh/authorized_keys",
                     node.authorized_keys_text().encode(), 0o600, False))
 
-    # /etc/network/interfaces — eth0 = dhcp always; wlan0 = dhcp if wifi.
+    # /etc/network/interfaces — eth0 = static OR dhcp; wlan0 = dhcp if wifi.
     # `hostname` option tells udhcpc to send DHCP option 12 in its
     # requests; routers + totaldns name-locking can then identify
     # the device by its baked hostname instead of just MAC.
     dhcp_hostname = f"    hostname {node.hostname}\n"
-    interfaces = (
-        "auto lo\niface lo inet loopback\n\n"
-        "auto eth0\niface eth0 inet dhcp\n" + dhcp_hostname
-    )
+    interfaces = "auto lo\niface lo inet loopback\n\nauto eth0\n"
+    if node.has_static_ip:
+        # Static for eth0. Avoids the udhcpc rabbit hole on quirky
+        # kernels (busybox 1.37 + Alpine RPi 3.21 + Pi 5 macb driver
+        # has seen "address family not supported" failures).
+        interfaces += (
+            f"iface eth0 inet static\n"
+            f"    address {node.static_address_only}\n"
+            f"    netmask {node.static_netmask}\n"
+            f"    gateway {node.gateway_ipv4}\n"
+        )
+    else:
+        interfaces += f"iface eth0 inet dhcp\n{dhcp_hostname}"
     if node.has_wifi:
         interfaces += (
             "\nauto wlan0\niface wlan0 inet dhcp\n" + dhcp_hostname
@@ -208,6 +217,16 @@ def _write_apkovl(out: Path, node: NodeConfig) -> None:
         ))
     members.append(("etc/network/interfaces", interfaces.encode(), 0o644, False))
 
+    # /etc/resolv.conf for static-IP nodes (DHCP fills this on its own
+    # but static doesn't). Default to Cloudflare + Google — operator
+    # can replace post-boot if they want their own resolver.
+    if node.has_static_ip:
+        members.append((
+            "etc/resolv.conf",
+            b"nameserver 1.1.1.1\nnameserver 8.8.8.8\n",
+            0o644, False,
+        ))
+
     # First-boot script: install openssh + avahi (for .local mDNS
     # discovery — headless Pis are nearly unfindable without it) +
     # (if wifi) wpa_supplicant, then self-disable.
@@ -215,8 +234,21 @@ def _write_apkovl(out: Path, node: NodeConfig) -> None:
         "#!/bin/sh\n"
         "# pi-bake first-boot setup. Self-disables after one successful run.\n"
         "set -e\n"
+        # Best-effort time sync BEFORE apk update — Pi has no RTC, so
+        # the clock is whatever the OS booted with (often 1970). apk's
+        # TLS verify (alpine repos are HTTPS) refuses to validate certs
+        # dated wildly off, AND ssh-keygen complains about future-dated
+        # keys. Two-step: pull a Date from a known HTTP server first,
+        # then once chrony is in, real NTP takes over.\n"
+        "date -u -s \"$(wget -q -S -O /dev/null http://dl-cdn.alpinelinux.org/ 2>&1 "
+        "| awk '/^  Date:/ {sub(/^  Date: /,\"\"); print; exit}')\" 2>/dev/null || true\n"
         "apk update\n"
-        "apk add openssh-server iproute2 ca-certificates avahi avahi-tools dbus\n"
+        # chrony for ongoing time sync; wifi-firmware metapackage pulls
+        # in brcmfmac + iwlwifi blobs so both built-in Pi 5 WiFi (BCM43455)
+        # and Intel BE200 PCIe cards have their firmware available;
+        # avahi for headless mDNS discovery.
+        "apk add openssh-server iproute2 ca-certificates avahi avahi-tools "
+        "dbus chrony wifi-firmware\n"
     )
     if node.has_wifi:
         firstboot += "apk add wpa_supplicant wireless-regdb\n"
@@ -228,6 +260,9 @@ def _write_apkovl(out: Path, node: NodeConfig) -> None:
         "rc-service dbus start\n"
         "rc-update add avahi-daemon default\n"
         "rc-service avahi-daemon start\n"
+        # chrony for ongoing NTP sync (Pi has no RTC).
+        "rc-update add chronyd default\n"
+        "rc-service chronyd start\n"
     )
     if node.has_wifi:
         firstboot += (

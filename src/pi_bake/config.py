@@ -48,6 +48,12 @@ class NodeConfig:
     wifi_country: str = "US"
     timezone: str = "UTC"
     extra_pubkeys: list[str] = field(default_factory=list)
+    # Optional static IP for eth0. Format "<addr>/<bits>" e.g.
+    # "192.168.4.111/24". When set, /etc/network/interfaces uses
+    # `iface eth0 inet static` instead of dhcp + carries the
+    # gateway. Empty → DHCP (the default).
+    static_ipv4: str = ""
+    gateway_ipv4: str = ""
 
     def __post_init__(self) -> None:
         # Hostname must be a DNS label.
@@ -70,6 +76,16 @@ class NodeConfig:
             raise ValueError(
                 "wifi_ssid + wifi_psk must both be set or both empty"
             )
+        # Static IP: address requires a gateway too.
+        if bool(self.static_ipv4) != bool(self.gateway_ipv4):
+            raise ValueError(
+                "static_ipv4 + gateway_ipv4 must both be set or both empty"
+            )
+        if self.static_ipv4 and "/" not in self.static_ipv4:
+            raise ValueError(
+                f"static_ipv4 must be CIDR form (e.g. 192.168.4.111/24); "
+                f"got {self.static_ipv4!r}"
+            )
 
     @property
     def all_pubkeys(self) -> list[str]:
@@ -86,6 +102,28 @@ class NodeConfig:
     @property
     def has_wifi(self) -> bool:
         return bool(self.wifi_ssid)
+
+    @property
+    def has_static_ip(self) -> bool:
+        return bool(self.static_ipv4)
+
+    @property
+    def static_address_only(self) -> str:
+        """`192.168.4.111` part of `192.168.4.111/24`."""
+        return self.static_ipv4.split("/", 1)[0] if self.has_static_ip else ""
+
+    @property
+    def static_prefixlen(self) -> str:
+        return self.static_ipv4.split("/", 1)[1] if self.has_static_ip else ""
+
+    @property
+    def static_netmask(self) -> str:
+        """Dotted-decimal form for /etc/network/interfaces."""
+        if not self.has_static_ip:
+            return ""
+        bits = int(self.static_prefixlen)
+        mask_int = (0xFFFFFFFF << (32 - bits)) & 0xFFFFFFFF
+        return ".".join(str((mask_int >> (8 * (3 - i))) & 0xFF) for i in range(4))
 
     def wpa_supplicant_conf(self) -> str:
         """Render `/etc/wpa_supplicant/wpa_supplicant.conf` text.
