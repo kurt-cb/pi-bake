@@ -114,3 +114,22 @@ def test_wired_firstboot_skips_wifi_pkgs(tmp_path):
         script = tf.extractfile("etc/local.d/pi-bake-firstboot.start").read().decode()
     assert "wpa_supplicant" not in script
     assert "openssh-server" in script
+
+
+def test_firstboot_installs_avahi_for_mdns(tmp_path):
+    """Headless Pis need `<hostname>.local` resolution or finding
+    them on a LAN is a pain — avahi-daemon serves that role."""
+    n = NodeConfig(hostname="pi", ssh_pubkey=_PUBKEY)
+    with _bake(n, tmp_path) as tf:
+        script = tf.extractfile("etc/local.d/pi-bake-firstboot.start").read().decode()
+    assert "avahi" in script
+    assert "rc-service avahi-daemon start" in script
+
+
+def test_interfaces_carries_dhcp_hostname(tmp_path):
+    """/etc/network/interfaces should pass the hostname to udhcpc
+    via DHCP option 12 — routers + totaldns name-locking key off it."""
+    n = NodeConfig(hostname="pi-radio-1", ssh_pubkey=_PUBKEY)
+    with _bake(n, tmp_path) as tf:
+        ifaces = tf.extractfile("etc/network/interfaces").read().decode()
+    assert "hostname pi-radio-1" in ifaces

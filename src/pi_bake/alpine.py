@@ -189,9 +189,18 @@ def _write_apkovl(out: Path, node: NodeConfig) -> None:
                     node.authorized_keys_text().encode(), 0o600, False))
 
     # /etc/network/interfaces — eth0 = dhcp always; wlan0 = dhcp if wifi.
-    interfaces = "auto lo\niface lo inet loopback\n\nauto eth0\niface eth0 inet dhcp\n"
+    # `hostname` option tells udhcpc to send DHCP option 12 in its
+    # requests; routers + totaldns name-locking can then identify
+    # the device by its baked hostname instead of just MAC.
+    dhcp_hostname = f"    hostname {node.hostname}\n"
+    interfaces = (
+        "auto lo\niface lo inet loopback\n\n"
+        "auto eth0\niface eth0 inet dhcp\n" + dhcp_hostname
+    )
     if node.has_wifi:
-        interfaces += "\nauto wlan0\niface wlan0 inet dhcp\n"
+        interfaces += (
+            "\nauto wlan0\niface wlan0 inet dhcp\n" + dhcp_hostname
+        )
         members.append((
             "etc/wpa_supplicant/wpa_supplicant.conf",
             node.wpa_supplicant_conf().encode(),
@@ -199,20 +208,26 @@ def _write_apkovl(out: Path, node: NodeConfig) -> None:
         ))
     members.append(("etc/network/interfaces", interfaces.encode(), 0o644, False))
 
-    # First-boot script: install openssh + (if wifi) wpa_supplicant, then
-    # self-disable.
+    # First-boot script: install openssh + avahi (for .local mDNS
+    # discovery — headless Pis are nearly unfindable without it) +
+    # (if wifi) wpa_supplicant, then self-disable.
     firstboot = (
         "#!/bin/sh\n"
         "# pi-bake first-boot setup. Self-disables after one successful run.\n"
         "set -e\n"
         "apk update\n"
-        "apk add openssh-server iproute2 ca-certificates\n"
+        "apk add openssh-server iproute2 ca-certificates avahi avahi-tools dbus\n"
     )
     if node.has_wifi:
         firstboot += "apk add wpa_supplicant wireless-regdb\n"
     firstboot += (
         "rc-update add sshd default\n"
         "rc-service sshd start\n"
+        # dbus + avahi-daemon so `<hostname>.local` resolves on the LAN.
+        "rc-update add dbus default\n"
+        "rc-service dbus start\n"
+        "rc-update add avahi-daemon default\n"
+        "rc-service avahi-daemon start\n"
     )
     if node.has_wifi:
         firstboot += (
