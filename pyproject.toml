@@ -9,13 +9,14 @@ description = "Generate flashable, headless Raspberry Pi images (no setup-alpine
 readme = "README.md"
 license = { text = "MIT" }
 authors = [{ name = "Kurt Godwin", email = "kurtgo@hotmail.com" }]
-requires-python = ">=3.10"
+requires-python = ">=3.9"
 keywords = ["raspberry-pi", "alpine", "raspbian", "headless", "image", "sd-card"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",

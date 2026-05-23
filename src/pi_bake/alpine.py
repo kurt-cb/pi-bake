@@ -67,7 +67,14 @@ def bake(
         extracted.mkdir()
         LOG.info("extracting %s", tarball.name)
         with tarfile.open(tarball, "r:*") as tf:
-            tf.extractall(extracted, filter="data")
+            # `filter="data"` is Python 3.12+ and applies path-traversal
+            # sanitization. Pre-3.12 lacks the kwarg; the official Alpine
+            # tarball is trusted upstream content so the older permissive
+            # behavior is fine. Try the safer call first, fall back.
+            try:
+                tf.extractall(extracted, filter="data")
+            except TypeError:
+                tf.extractall(extracted)
 
         # 3. Pour the tree into the FAT32 image.
         LOG.info("mcopy: tarball → image")
