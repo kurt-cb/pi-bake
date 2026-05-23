@@ -1,0 +1,39 @@
+"""pi-bake — generate flashable, headless Raspberry Pi images.
+
+Bake `(board, os, version, hostname, ssh_pubkey, [wifi])` into a
+single `.img.gz` operator dd's to an SD card. Boot the Pi → it
+joins the network → operator can SSH in. No keyboard, no monitor,
+no `setup-alpine`.
+
+Public API (also surfaced via the `pi-bake` CLI):
+
+    from pi_bake import NodeConfig, build, list_boards, list_oses
+    out = build(
+        board="pi-zero-2-w",
+        os_name="alpine",
+        version="3.21",
+        node=NodeConfig(
+            hostname="pi-radio-1",
+            ssh_pubkey="ssh-ed25519 AAAA...",
+            wifi_ssid="totaldns-lab",
+            wifi_psk="secret",
+        ),
+        out_path="~/sdcards/pi-radio-1.img.gz",
+    )
+
+Designed to be agnostic of any specific downstream — totaldns,
+home-server projects, anything that wants a flash-and-boot Pi.
+"""
+from pi_bake.boards import Board, BOARDS, list_boards
+from pi_bake.config import NodeConfig
+from pi_bake.oses import OSImage, OSES, list_oses, resolve_image
+from pi_bake.bake import build, supports
+
+__version__ = "0.1.0"
+
+__all__ = [
+    "Board", "BOARDS", "list_boards",
+    "OSImage", "OSES", "list_oses", "resolve_image",
+    "NodeConfig",
+    "build", "supports",
+]

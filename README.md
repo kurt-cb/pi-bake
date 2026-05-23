@@ -1,0 +1,151 @@
+# pi-bake
+
+Generate flashable, headless Raspberry Pi images. Flash one
+`.img.gz` per Pi, boot, SSH in. No `setup-alpine` interactive
+walk, no `rpi-imager` GUI clicking through pre-fill, no console
+on the Pi.
+
+## What gets baked
+
+Per node, from CLI flags or the Python API:
+
+- **Hostname**       → `/etc/hostname`
+- **SSH pubkey**     → `/root/.ssh/authorized_keys` (mode 0600) +
+                       sshd `PasswordAuthentication no`
+- **WiFi creds** (optional) → `/etc/wpa_supplicant/wpa_supplicant.conf`
+  so the Pi auto-joins on first boot. Omit for wired-only.
+- **Timezone, regulatory country** (sensible defaults)
+- **First-boot script** that `apk add`s the small set of packages
+  (openssh-server, iproute2, etc.), enables services, then
+  self-disables.
+
+That's it. No role-specific code, no totaldns, no platform lock-in.
+Once the Pi is on the network, whatever orchestrator you use
+(pyinfra, Ansible, plain SSH) takes over.
+
+## Install
+
+```
+pip install pi-bake
+```
+
+System tools (one-time per dev machine):
+
+```
+# Fedora
+sudo dnf install mtools dosfstools
+# Debian / Ubuntu
+sudo apt install mtools dosfstools
+# Alpine
+apk add mtools dosfstools
+```
+
+The Alpine baker uses **`mtools`** (no root). The Raspbian baker
+(v0.2) will additionally need `sudo` for `losetup`.
+
+## Quick start
+
+```
+# What can we bake for what?
+pi-bake list-boards
+pi-bake list-os --board pi-zero-2-w
+
+# Bake an Alpine image for a Pi Zero 2 W with WiFi creds.
+pi-bake build \
+  --board pi-zero-2-w \
+  --os alpine \
+  --hostname pi-radio-1 \
+  --ssh-pubkey ~/.ssh/id_ed25519.pub \
+  --wifi-ssid totaldns-lab \
+  --wifi-psk secret \
+  --out ~/sdcards/pi-radio-1.img.gz
+
+# Flash. Replace mmcblk0 with your SD card's actual device.
+zcat ~/sdcards/pi-radio-1.img.gz | sudo dd of=/dev/mmcblk0 bs=4M status=progress
+
+# Boot the Pi. Wait ~30s. Then:
+ssh root@pi-radio-1.lan uptime
+```
+
+For wired-only nodes (eth0), omit the WiFi flags:
+
+```
+pi-bake build \
+  --board pi-5 --os alpine --hostname boat \
+  --ssh-pubkey ~/.ssh/id_ed25519.pub \
+  --out ~/sdcards/boat.img.gz
+```
+
+## Supported boards × OSes
+
+| Board          | Alpine | Raspbian | Debian |
+|----------------|--------|----------|--------|
+| Pi Zero W      | ✓ (armhf) | ✗ (32-bit ARMv6 not packaged) | ✗ |
+| Pi Zero 2 W    | ✓        | ✓ (32-bit ARMv7 / arm64) | ✗ |
+| Pi 3           | ✓        | ✓        | ✗ |
+| Pi 4           | ✓        | ✓        | ✓ |
+| Pi 5           | ✓ (3.21+) | ✓        | ✓ |
+
+Run `pi-bake list-os --board <b>` for the current matrix.
+
+## Status
+
+**v0.1**: Alpine baker is fully working (no-root, mtools). Raspbian
++ Debian backends are stubbed with a clear error pointing at the
+v0.2 roadmap. Most Pi 4 / Pi 5 deployments bootstrap with
+`rpi-imager`'s pre-fill flow today — `pi-bake` will take that
+over in v0.2.
+
+## Python API
+
+The CLI is a thin wrapper around `pi_bake.build()`:
+
+```python
+from pi_bake import build, NodeConfig
+
+build(
+    board="pi-zero-2-w",
+    os_name="alpine",
+    version=None,                       # latest known-good
+    node=NodeConfig(
+        hostname="pi-radio-1",
+        ssh_pubkey=open(".../id_ed25519.pub").read(),
+        wifi_ssid="totaldns-lab",
+        wifi_psk="secret",
+    ),
+    out_path="~/sdcards/pi-radio-1.img.gz",
+)
+```
+
+## Roadmap
+
+- **v0.2 — Raspbian + Debian backends.** `losetup -P` + `firstrun.sh`
+  injection. Needs `sudo`; CLI prompts honestly.
+- **v0.2 — dynamic OS version discovery.** Pull
+  `https://dl-cdn.alpinelinux.org/alpine/` and the rpi downloads
+  index instead of the hardcoded `versions` tuples in the catalog.
+- **v0.3 — multi-image batch.** `pi-bake build-many topology.json`
+  emits an `.img.gz` per node entry in one go.
+- **v0.3 — static IP option.** Today we DHCP from first reachable
+  iface; static-IP-only deployments need a `--static-v4` flag.
+- **v0.3 — encrypted overlay** for the rootfs (LUKS).
+
+## Why does this exist
+
+Three reasons to bake images instead of using
+`rpi-imager` pre-fill or hand-running `setup-alpine`:
+
+1. **Per-node config in a script.** Topology files (any shape —
+   JSON, YAML, a hand-written shell script) drive `pi-bake build`
+   in a loop. Lab grows from 1 Pi to 20 without 20 separate
+   keyboard sessions.
+2. **Reproducible.** Same inputs → same `.img.gz`. Re-flash a
+   replacement SD card identically; clone a node by changing the
+   hostname.
+3. **Alpine RPi has no `rpi-imager` pre-fill equivalent.** This is
+   the only convenient headless flow for the Pi Zero W / 2 W
+   family running Alpine.
+
+## License
+
+MIT — see `LICENSE`.
