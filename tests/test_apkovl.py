@@ -107,7 +107,7 @@ def test_apk_world_includes_sshd_and_dhcpcd(tmp_path):
         world = set(_extract(tf, "etc/apk/world").split())
     # The minimum viable set: real sshd (with sftp), DHCP, clock.
     assert {"openssh-server", "openssh-sftp-server",
-            "dhcpcd", "dhcpcd-openrc", "chrony"} <= world
+            "dhcpcd", "dhcpcd-openrc", "chrony", "openssh-client-default"} <= world
 
 
 def test_apk_world_adds_wpa_supplicant_for_wifi(tmp_path):

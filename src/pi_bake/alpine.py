@@ -300,6 +300,14 @@ def _write_apkovl(out: Path, node: NodeConfig) -> None:
         # "subsystem request failed". pyinfra also leans on SFTP for
         # file pushes. Ships in stock RPi tarball — free to include.
         "openssh-sftp-server",
+        # openssh CLIENT (scp + ssh binaries on the Pi itself). Lets
+        # operators push files INTO the Pi with `scp` from another
+        # host (modern scp 9.0+ uses SFTP, but the legacy `scp -O`
+        # path needs scp binary on the remote — and operators
+        # reaching for plain `scp file pi:/...` expect it to work).
+        # Also lets the Pi originate ssh/scp outbound (e.g. pulling
+        # configs from a peer). Ships in stock RPi tarball.
+        "openssh-client-default",
         "chrony",
         "chrony-openrc",
     ]
