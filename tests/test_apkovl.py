@@ -127,6 +127,21 @@ def test_apk_world_omits_wpa_supplicant_for_wired(tmp_path):
     assert "wpa_supplicant" not in world
 
 
+def test_dhcpcd_conf_sends_hostname_option(tmp_path):
+    """Without the bare `hostname` directive in /etc/dhcpcd.conf,
+    dhcpcd does NOT send DHCP option 12 — even though /etc/hostname
+    is set. totaldns then logs leases against a synthesized
+    `unknown-<6mac>` placeholder instead of the operator-chosen
+    name (found on real hardware 2026-05-23)."""
+    n = NodeConfig(hostname="pi", ssh_pubkey=_PUBKEY)
+    with _bake(n, tmp_path) as tf:
+        conf = _extract(tf, "etc/dhcpcd.conf")
+    # The bare `hostname` directive, on its own line — no `# hostname`
+    # comment or `hostname foo` static override.
+    lines = [l.strip() for l in conf.splitlines() if not l.startswith("#")]
+    assert "hostname" in lines
+
+
 def test_apk_repositories_includes_local_cache(tmp_path):
     """Without the local /media/mmcblk0/apks line, init's apk add
     (run with --no-network on default cmdline) finds nothing."""
