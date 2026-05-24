@@ -178,6 +178,29 @@ def _write_apkovl(out: Path, node: NodeConfig) -> None:
     members: list[tuple[str, bytes, int, bool]] = []
     # (path, content, mode, is_symlink)
 
+    # The whole reason the rest of this works. Alpine RPi's /init,
+    # when it finds an apkovl, SKIPS the "add default boot services"
+    # block (rc_add modloop sysinit, rc_add modules boot, …) UNLESS
+    # this marker file is present. Without modloop in sysinit, the
+    # squashfs of kernel modules never mounts on /lib/modules, so
+    # af_packet, ipv6, almost every needed network driver is absent
+    # — and every DHCP client fails with "Address family not
+    # supported by protocol" (seen on Pi 5 with both busybox udhcpc
+    # and dhcpcd 10.x). The init script deletes this marker after
+    # consuming it, so it's truly one-shot.
+    members.append(("etc/.default_boot_services", b"", 0o644, False))
+
+    # lbu (Alpine "local backup") writes a fresh apkovl onto the FAT
+    # so the operator's post-boot changes survive reboot. Without
+    # LBU_MEDIA set, `lbu commit` and even `lbu status` just print
+    # usage. mmcblk0 is the SD card's FAT partition, mounted at
+    # /media/mmcblk0 by Alpine RPi init.
+    members.append((
+        "etc/lbu/lbu.conf",
+        b'LBU_MEDIA="mmcblk0"\n',
+        0o644, False,
+    ))
+
     members.append(("etc/hostname", f"{node.hostname}\n".encode(), 0o644, False))
     members.append((
         "etc/hosts",
@@ -192,11 +215,16 @@ def _write_apkovl(out: Path, node: NodeConfig) -> None:
     members.append(("etc/timezone", f"{node.timezone}\n".encode(), 0o644, False))
 
     # sshd_config: enable, no passwords, root login by key.
+    # Alpine's openssh is built WITHOUT PAM — `UsePAM yes` makes sshd
+    # refuse to start ("Bad configuration option: UsePAM"). Don't add
+    # it back unless you also switch to a PAM-enabled openssh build.
+    # `ChallengeResponseAuthentication` was renamed to
+    # `KbdInteractiveAuthentication` in openssh 8.7; 9.9 still parses
+    # it but it's redundant when PasswordAuthentication=no.
     sshd_cfg = (
         "PermitRootLogin prohibit-password\n"
         "PasswordAuthentication no\n"
-        "ChallengeResponseAuthentication no\n"
-        "UsePAM yes\n"
+        "KbdInteractiveAuthentication no\n"
         "PrintMotd no\n"
         "AcceptEnv LANG LC_*\n"
         "Subsystem sftp /usr/lib/ssh/sftp-server\n"
@@ -255,6 +283,11 @@ def _write_apkovl(out: Path, node: NodeConfig) -> None:
         "alpine-base",
         "openssh-server",
         "openssh-server-common-openrc",
+        # openssh-server alone has no sftp-server binary, so modern
+        # scp (openssh 9.0+ defaults to SFTP protocol) fails with
+        # "subsystem request failed". pyinfra also leans on SFTP for
+        # file pushes. Ships in stock RPi tarball — free to include.
+        "openssh-sftp-server",
         "chrony",
         "chrony-openrc",
     ]

@@ -98,12 +98,16 @@ def test_runlevel_entries_are_symlinks(tmp_path):
 def test_apk_world_includes_sshd_and_dhcpcd(tmp_path):
     """Alpine RPi init runs `apk add --root $sysroot --no-network`
     reading /etc/apk/world. Anything we list here gets installed at
-    first boot from the local /apks cache — no network required."""
+    first boot from the local /apks cache — no network required.
+
+    openssh-sftp-server is required because modern scp (openssh
+    9.0+) uses SFTP by default, and pyinfra needs SFTP too."""
     n = NodeConfig(hostname="pi", ssh_pubkey=_PUBKEY)
     with _bake(n, tmp_path) as tf:
         world = set(_extract(tf, "etc/apk/world").split())
-    # The minimum viable set: real sshd, working DHCP, working clock.
-    assert {"openssh-server", "dhcpcd", "dhcpcd-openrc", "chrony"} <= world
+    # The minimum viable set: real sshd (with sftp), DHCP, clock.
+    assert {"openssh-server", "openssh-sftp-server",
+            "dhcpcd", "dhcpcd-openrc", "chrony"} <= world
 
 
 def test_apk_world_adds_wpa_supplicant_for_wifi(tmp_path):
@@ -169,6 +173,46 @@ def test_static_ip_omits_dhcpcd_from_world(tmp_path):
         world = _extract(tf, "etc/apk/world").split()
     assert "dhcpcd" not in world
     assert "dhcpcd-openrc" not in world
+
+
+def test_default_boot_services_marker_present(tmp_path):
+    """Alpine RPi's /init only wires up modloop+modules+etc. in the
+    sysinit/boot runlevels when /etc/.default_boot_services is
+    present (or when there's no apkovl at all). Without that, the
+    squashfs of kernel modules never mounts, and af_packet is
+    missing — every DHCP client fails with "Address family not
+    supported". This empty marker file is THE thing that makes
+    networking work."""
+    n = NodeConfig(hostname="pi", ssh_pubkey=_PUBKEY)
+    with _bake(n, tmp_path) as tf:
+        info = tf.getmember("etc/.default_boot_services")
+    assert info.isreg()
+    assert info.size == 0
+
+
+def test_lbu_conf_sets_media(tmp_path):
+    """`lbu commit` (Alpine's local-backup tool, how the operator
+    persists apkovl changes across reboots) refuses to do anything
+    without LBU_MEDIA set. The stock /etc/lbu/lbu.conf has it
+    commented out."""
+    n = NodeConfig(hostname="pi", ssh_pubkey=_PUBKEY)
+    with _bake(n, tmp_path) as tf:
+        conf = _extract(tf, "etc/lbu/lbu.conf")
+    assert "LBU_MEDIA" in conf
+    assert "mmcblk0" in conf
+
+
+def test_sshd_config_omits_unsupported_directives(tmp_path):
+    """Alpine's openssh is built WITHOUT PAM. `UsePAM yes` makes
+    sshd refuse to start ('Bad configuration option')."""
+    n = NodeConfig(hostname="pi", ssh_pubkey=_PUBKEY)
+    with _bake(n, tmp_path) as tf:
+        cfg = _extract(tf, "etc/ssh/sshd_config")
+    assert "UsePAM" not in cfg
+    # ChallengeResponseAuthentication was renamed in openssh 8.7
+    # to KbdInteractiveAuthentication. The old spelling still
+    # parses on 9.x but is misleading.
+    assert "ChallengeResponseAuthentication" not in cfg
 
 
 def test_no_firstboot_script(tmp_path):
