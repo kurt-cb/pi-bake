@@ -139,23 +139,41 @@ def _mcopy_into(img: Path, src: Path, dest: str = "/") -> None:
 def _write_apkovl(out: Path, node: NodeConfig) -> None:
     """Build an Alpine apkovl.tar.gz for `node`.
 
+    Strategy: rely on Alpine RPi's diskless init, which on first boot
+    runs `apk add --root $sysroot --no-network` reading packages from
+    the overlay's `/etc/apk/world` and pulling apks from the local
+    `/media/mmcblk0/apks/` cache that ships in the tarball. So as long
+    as everything we want is in the stock cache, no network is needed
+    to come up with sshd + DHCP + NTP wired up. No first-boot script,
+    no over-the-network apk fetch dance — the package set just IS at
+    the end of the first boot.
+
+    Stock Alpine RPi tarball (verified) ships: openssh-server,
+    openssh-server-common-openrc, dhcpcd, dhcpcd-openrc, chrony,
+    chrony-openrc, wpa_supplicant, wpa_supplicant-openrc, iw,
+    ifupdown-ng-wifi, ca-certificates-bundle. NOT shipped: avahi,
+    dbus, linux-firmware-brcm, linux-firmware-intel — those need
+    a bake-time fetch (future v0.2 work, see ROADMAP.md).
+
+    DHCP choice: dhcpcd, not busybox udhcpc. udhcpc 1.37 + Alpine 3.21
+    + Pi 5's macb driver hangs with "address family not supported".
+    dhcpcd is more reliable across kernels and is what setup-alpine
+    selects by default in recent releases.
+
     Files we lay down (paths relative to /):
       etc/hostname                    — node.hostname
-      etc/hosts                       — minimal localhost + hostname entry
+      etc/hosts                       — localhost + hostname entry
       etc/timezone                    — node.timezone
-      etc/ssh/sshd_config             — PasswordAuthentication no
+      etc/ssh/sshd_config             — root-by-key only, no passwords
       root/.ssh/authorized_keys       — node.all_pubkeys
-      root/.ssh                       — mode 0700
-      etc/wpa_supplicant/wpa_supplicant.conf — only when wifi configured
-      etc/network/interfaces          — eth0 = dhcp; wlan0 = dhcp if wifi
-      etc/runlevels/default/sshd      — symlink so sshd starts at boot
-      etc/runlevels/default/wpa_supplicant — same if wifi
-      etc/local.d/pi-bake-firstboot.start — runs once: apk update + add openssh
-      etc/runlevels/default/local     — symlink so local.d runs at boot
-
-    NOT a complete apkovl — we lean on Alpine's first-boot
-    behaviour to wire the rest. Anything role-specific is pyinfra's
-    job after the box is up.
+      etc/network/interfaces          — lo only (+ eth0 static path)
+      etc/apk/world                   — packages init will install
+      etc/apk/repositories            — local cache + upstream main/community
+      etc/runlevels/default/sshd      — symlink, started at boot
+      etc/runlevels/default/dhcpcd    — symlink (skipped on static-IP)
+      etc/runlevels/default/chronyd   — symlink
+      etc/runlevels/default/networking — symlink (brings up lo + static eth0)
+      etc/wpa_supplicant/wpa_supplicant.conf + runlevel — only when wifi
     """
     members: list[tuple[str, bytes, int, bool]] = []
     # (path, content, mode, is_symlink)
@@ -188,36 +206,24 @@ def _write_apkovl(out: Path, node: NodeConfig) -> None:
     members.append(("root/.ssh/authorized_keys",
                     node.authorized_keys_text().encode(), 0o600, False))
 
-    # /etc/network/interfaces — eth0 = static OR dhcp; wlan0 = dhcp if wifi.
-    # `hostname` option tells udhcpc to send DHCP option 12 in its
-    # requests; routers + totaldns name-locking can then identify
-    # the device by its baked hostname instead of just MAC.
-    dhcp_hostname = f"    hostname {node.hostname}\n"
-    interfaces = "auto lo\niface lo inet loopback\n\nauto eth0\n"
+    # /etc/network/interfaces — lo is always managed by `networking`.
+    # For DHCP nodes, eth0 + wlan0 are NOT listed here: dhcpcd runs as
+    # a daemon and watches all interfaces, so listing them under
+    # `networking` would race with dhcpcd. For static-IP nodes, eth0
+    # IS listed (and dhcpcd is dropped from the runlevel entirely —
+    # see further down).
+    interfaces = "auto lo\niface lo inet loopback\n"
     if node.has_static_ip:
-        # Static for eth0. Avoids the udhcpc rabbit hole on quirky
-        # kernels (busybox 1.37 + Alpine RPi 3.21 + Pi 5 macb driver
-        # has seen "address family not supported" failures).
         interfaces += (
+            f"\nauto eth0\n"
             f"iface eth0 inet static\n"
             f"    address {node.static_address_only}\n"
             f"    netmask {node.static_netmask}\n"
             f"    gateway {node.gateway_ipv4}\n"
         )
-    else:
-        interfaces += f"iface eth0 inet dhcp\n{dhcp_hostname}"
-    if node.has_wifi:
-        interfaces += (
-            "\nauto wlan0\niface wlan0 inet dhcp\n" + dhcp_hostname
-        )
-        members.append((
-            "etc/wpa_supplicant/wpa_supplicant.conf",
-            node.wpa_supplicant_conf().encode(),
-            0o600, False,
-        ))
     members.append(("etc/network/interfaces", interfaces.encode(), 0o644, False))
 
-    # /etc/resolv.conf for static-IP nodes (DHCP fills this on its own
+    # /etc/resolv.conf for static-IP nodes (DHCP fills this via dhcpcd
     # but static doesn't). Default to Cloudflare + Google — operator
     # can replace post-boot if they want their own resolver.
     if node.has_static_ip:
@@ -227,68 +233,75 @@ def _write_apkovl(out: Path, node: NodeConfig) -> None:
             0o644, False,
         ))
 
-    # First-boot script: install openssh + avahi (for .local mDNS
-    # discovery — headless Pis are nearly unfindable without it) +
-    # (if wifi) wpa_supplicant, then self-disable.
-    firstboot = (
-        "#!/bin/sh\n"
-        "# pi-bake first-boot setup. Self-disables after one successful run.\n"
-        "set -e\n"
-        # Best-effort time sync BEFORE apk update — Pi has no RTC, so
-        # the clock is whatever the OS booted with (often 1970). apk's
-        # TLS verify (alpine repos are HTTPS) refuses to validate certs
-        # dated wildly off, AND ssh-keygen complains about future-dated
-        # keys. Two-step: pull a Date from a known HTTP server first,
-        # then once chrony is in, real NTP takes over.\n"
-        "date -u -s \"$(wget -q -S -O /dev/null http://dl-cdn.alpinelinux.org/ 2>&1 "
-        "| awk '/^  Date:/ {sub(/^  Date: /,\"\"); print; exit}')\" 2>/dev/null || true\n"
-        "apk update\n"
-        # chrony for ongoing time sync; wifi-firmware metapackage pulls
-        # in brcmfmac + iwlwifi blobs so both built-in Pi 5 WiFi (BCM43455)
-        # and Intel BE200 PCIe cards have their firmware available;
-        # avahi for headless mDNS discovery.
-        "apk add openssh-server iproute2 ca-certificates avahi avahi-tools "
-        "dbus chrony wifi-firmware\n"
-    )
-    if node.has_wifi:
-        firstboot += "apk add wpa_supplicant wireless-regdb\n"
-    firstboot += (
-        "rc-update add sshd default\n"
-        "rc-service sshd start\n"
-        # dbus + avahi-daemon so `<hostname>.local` resolves on the LAN.
-        "rc-update add dbus default\n"
-        "rc-service dbus start\n"
-        "rc-update add avahi-daemon default\n"
-        "rc-service avahi-daemon start\n"
-        # chrony for ongoing NTP sync (Pi has no RTC).
-        "rc-update add chronyd default\n"
-        "rc-service chronyd start\n"
-    )
-    if node.has_wifi:
-        firstboot += (
-            "rc-update add wpa_supplicant default\n"
-            "rc-service wpa_supplicant start\n"
-        )
-    firstboot += (
-        "# Self-disable: mv this script out of local.d so it won't run again.\n"
-        "mv /etc/local.d/pi-bake-firstboot.start /var/log/pi-bake-firstboot.done\n"
-    )
+    # /etc/apk/repositories — local FAT cache first (init's `--no-network`
+    # path resolves from here), then upstream so post-boot `apk add`
+    # works for anything not in the cache. Track the matching version
+    # to avoid mixed-release ABI surprises.
     members.append((
-        "etc/local.d/pi-bake-firstboot.start",
-        firstboot.encode(), 0o755, False,
+        "etc/apk/repositories",
+        (
+            "/media/mmcblk0/apks\n"
+            "http://dl-cdn.alpinelinux.org/alpine/v3.21/main\n"
+            "http://dl-cdn.alpinelinux.org/alpine/v3.21/community\n"
+        ).encode(),
+        0o644, False,
     ))
 
-    # /etc/runlevels/default/* — symlinks into /etc/init.d/ to enable services.
-    for svc in ("local", "networking", "sshd"):
+    # /etc/apk/world — the package set Alpine init installs on first
+    # boot from the local /media/mmcblk0/apks cache. All listed
+    # packages MUST exist in the stock RPi tarball; anything else
+    # would need bake-time fetch (deferred — see module docstring).
+    world_pkgs = [
+        "alpine-base",
+        "openssh-server",
+        "openssh-server-common-openrc",
+        "chrony",
+        "chrony-openrc",
+    ]
+    if not node.has_static_ip:
+        world_pkgs += ["dhcpcd", "dhcpcd-openrc"]
+    if node.has_wifi:
+        world_pkgs += [
+            "wpa_supplicant",
+            "wpa_supplicant-openrc",
+            "iw",
+            "ifupdown-ng-wifi",
+        ]
+    members.append((
+        "etc/apk/world",
+        ("\n".join(world_pkgs) + "\n").encode(),
+        0o644, False,
+    ))
+
+    if node.has_wifi:
+        members.append((
+            "etc/wpa_supplicant/wpa_supplicant.conf",
+            node.wpa_supplicant_conf().encode(),
+            0o600, False,
+        ))
+        # Tell wpa_supplicant-openrc which interface to drive. Without
+        # this it boots in no-interface mode and never associates.
+        members.append((
+            "etc/conf.d/wpa_supplicant",
+            b'wpa_supplicant_args="-iwlan0"\n',
+            0o644, False,
+        ))
+
+    # /etc/runlevels/default/* — symlinks into /etc/init.d/ enable
+    # services at boot. The target init scripts don't exist yet when
+    # the apkovl is extracted; they appear when init's `apk add`
+    # installs the corresponding `*-openrc` packages from world (a few
+    # lines below). By the time the `default` runlevel actually starts,
+    # both symlink and target exist.
+    runlevel_svcs = ["networking", "sshd", "chronyd"]
+    if not node.has_static_ip:
+        runlevel_svcs.append("dhcpcd")
+    if node.has_wifi:
+        runlevel_svcs.append("wpa_supplicant")
+    for svc in runlevel_svcs:
         members.append((
             f"etc/runlevels/default/{svc}",
             f"/etc/init.d/{svc}".encode(),
-            0o777, True,
-        ))
-    if node.has_wifi:
-        members.append((
-            "etc/runlevels/default/wpa_supplicant",
-            b"/etc/init.d/wpa_supplicant",
             0o777, True,
         ))
 
