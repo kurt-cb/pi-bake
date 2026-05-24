@@ -306,20 +306,23 @@ def _write_apkovl(out: Path, node: NodeConfig) -> None:
         0o644, False,
     ))
 
-    # /etc/dhcpcd.conf — make dhcpcd always send DHCP option 12
-    # (hostname) on DISCOVER/REQUEST. By default dhcpcd reads
-    # /etc/hostname but does NOT advertise it. Without this line,
-    # totaldns (and most other DHCP servers) log the lease against
-    # a synthesized `unknown-<6mac>` placeholder instead of the
-    # operator-chosen hostname. The `option hostname` directive
-    # makes dhcpcd populate option 12 from /etc/hostname which we
-    # already write above.
+    # /etc/dhcpcd.conf — dhcpcd default config does NOT send DHCP
+    # option 12 (hostname); the `hostname` directive on its own
+    # line tells dhcpcd to populate option 12 from /etc/hostname.
+    # When `node.dhcp_send_hostname=False`, we bake the line as a
+    # comment instead — the device acts as an intentional test
+    # fixture for DHCP servers that need to recover the hostname
+    # via mDNS or accept a synthesized placeholder.
+    hostname_line = (
+        "hostname\n" if node.dhcp_send_hostname
+        else "# hostname    # disabled by pi-bake (--no-dhcp-hostname)\n"
+    )
     members.append((
         "etc/dhcpcd.conf",
         (
             "# /etc/dhcpcd.conf — written by pi-bake.\n"
             "# Read /etc/hostname + send it as DHCP option 12.\n"
-            "hostname\n"
+            + hostname_line +
             "# Standard set most installs want.\n"
             "duid\n"
             "persistent\n"

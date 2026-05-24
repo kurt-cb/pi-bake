@@ -129,6 +129,7 @@ def _cmd_build(args: argparse.Namespace) -> int:
         extra_pubkeys=extra_pubkeys,
         static_ipv4=args.static_v4 or "",
         gateway_ipv4=args.gateway_v4 or "",
+        dhcp_send_hostname=args.dhcp_send_hostname,
     )
 
     try:
@@ -213,6 +214,16 @@ def _build_parser() -> argparse.ArgumentParser:
                      help="eth0 IPv4 default gateway (required with --static-v4)")
     p_b.add_argument("--timezone", default="UTC",
                      help="default: UTC")
+    p_b.add_argument(
+        "--no-dhcp-hostname",
+        dest="dhcp_send_hostname",
+        action="store_false",
+        default=True,
+        help="DON'T send DHCP option 12 (hostname) on lease "
+             "DISCOVER/REQUEST. Default: send. Set this to bake an "
+             "intentional test fixture for DHCP-server-side hostname "
+             "recovery via mDNS / synthesized placeholder.",
+    )
     p_b.add_argument("--image-size-mb", type=int,
                      help="FAT32 image size in MB (default: backend's default)")
     p_b.add_argument("--out", required=True,

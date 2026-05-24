@@ -142,6 +142,25 @@ def test_dhcpcd_conf_sends_hostname_option(tmp_path):
     assert "hostname" in lines
 
 
+def test_dhcp_send_hostname_false_disables_option_12(tmp_path):
+    """`NodeConfig(dhcp_send_hostname=False)` bakes the `hostname`
+    directive as a comment instead, so the device intentionally
+    skips DHCP option 12 — useful as a test fixture for DHCP
+    servers that need to recover the hostname via mDNS."""
+    n = NodeConfig(hostname="pi", ssh_pubkey=_PUBKEY,
+                   dhcp_send_hostname=False)
+    with _bake(n, tmp_path) as tf:
+        conf = _extract(tf, "etc/dhcpcd.conf")
+    # No active `hostname` line (must not match `hostname` as the
+    # whole word at start of a non-comment line).
+    active_lines = [l.strip() for l in conf.splitlines()
+                    if l.strip() and not l.lstrip().startswith("#")]
+    assert "hostname" not in active_lines
+    # But the disabled-by-pi-bake comment IS present so operators
+    # can see WHY it's off.
+    assert "--no-dhcp-hostname" in conf
+
+
 def test_apk_repositories_includes_local_cache(tmp_path):
     """Without the local /media/mmcblk0/apks line, init's apk add
     (run with --no-network on default cmdline) finds nothing."""

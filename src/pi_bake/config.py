@@ -54,6 +54,15 @@ class NodeConfig:
     # gateway. Empty → DHCP (the default).
     static_ipv4: str = ""
     gateway_ipv4: str = ""
+    # Whether dhcpcd announces the system hostname in DHCP option 12
+    # on its DISCOVER/REQUEST. Default True (the correct, friendly
+    # behavior — operator-chosen hostname shows up in DHCP server
+    # logs + lease tables). Set to False to bake an intentional
+    # test fixture: a device that doesn't advertise its name via
+    # DHCP, so the server has to fall back to mDNS or accept a
+    # synthesized placeholder. Useful for exercising mDNS-based
+    # hostname recovery paths on the DHCP server side.
+    dhcp_send_hostname: bool = True
 
     def __post_init__(self) -> None:
         # Hostname must be a DNS label.
