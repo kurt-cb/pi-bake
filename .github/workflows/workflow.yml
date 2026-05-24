@@ -8,7 +8,7 @@
 #   PyPI Project Name: py-pi-bake
 #   Owner:             kurt-cb
 #   Repository:        pi-bake
-#   Workflow:          publish.yml
+#   Workflow:          workflow.yml
 #   Environment:       pypi
 #
 # (For the very first release before the PyPI project exists, use
