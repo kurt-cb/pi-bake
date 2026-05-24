@@ -2,6 +2,26 @@
 
 ## v0.2 — top of list
 
+### Pre-baked SSH host keys (no host-key-change warnings)
+Every reflash regenerates `/etc/ssh/ssh_host_*_key{,.pub}` so the
+operator's `~/.ssh/known_hosts` flags the rebuilt Pi as "REMOTE HOST
+IDENTIFICATION HAS CHANGED". Annoying; also breaks pyinfra runs
+without `-o StrictHostKeyChecking=no`.
+
+macmpi/alpine-linux-headless-bootstrap solves this by placing
+`ssh_host_*_key{,.pub}` files alongside the apkovl on the FAT
+partition; on first boot the apkovl restore copies them into
+`/etc/ssh/` with the right perms (600/644). pi-bake should
+either:
+
+  1. Generate a per-hostname keypair at bake time and bake it
+     into the apkovl (`/etc/ssh/ssh_host_ed25519_key{,.pub}`),
+     OR
+  2. Accept a `--ssh-host-key PATH` CLI flag pointing at an
+     existing keypair (so reflashes can reuse the same identity).
+
+Probably (2) — operator-controlled, easy to back up, no surprises.
+
 ### Bake-time package fetch (avahi + firmware)
 Alpine RPi's stock /apks cache ships sshd, dhcpcd, chrony,
 wpa_supplicant — enough for "real sshd + an IP". But .local
