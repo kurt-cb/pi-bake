@@ -24,12 +24,22 @@ Public API (also surfaced via the `pi-bake` CLI):
 Designed to be agnostic of any specific downstream — totaldns,
 home-server projects, anything that wants a flash-and-boot Pi.
 """
+from importlib.metadata import PackageNotFoundError, version as _pkg_version
+
 from pi_bake.boards import Board, BOARDS, list_boards
 from pi_bake.config import NodeConfig
 from pi_bake.oses import OSImage, OSES, list_oses, resolve_image
 from pi_bake.bake import build, supports
 
-__version__ = "0.1.0"
+try:
+    # Distribution name on PyPI is `py-pi-bake`; importlib.metadata
+    # reads it from the installed dist-info, which setuptools_scm
+    # populated from the git tag at build time.
+    __version__ = _pkg_version("py-pi-bake")
+except PackageNotFoundError:
+    # Running from a checkout without `pip install -e .` — fine for
+    # one-off tests, just don't claim a real version.
+    __version__ = "0.0.0+unknown"
 
 __all__ = [
     "Board", "BOARDS", "list_boards",

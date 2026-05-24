@@ -1,10 +1,18 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=68", "setuptools_scm>=8"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "pi-bake"
-version = "0.1.0"
+# PyPI distribution name is `py-pi-bake` (`pi-bake` was unavailable
+# on PyPI). The import name + console_script stay `pi_bake` /
+# `pi-bake`, so users `pip install py-pi-bake` then run
+# `pi-bake build ...`.
+name = "py-pi-bake"
+# Version is derived from the latest git tag via setuptools_scm.
+# `git tag v0.0.5 && git push --tags` releases 0.0.5; no version
+# string lives in source. CI needs fetch-depth: 0 so tags reach
+# the build environment.
+dynamic = ["version"]
 description = "Generate flashable, headless Raspberry Pi images (no setup-alpine, no rpi-imager-pre-fill required)"
 readme = "README.md"
 license = { text = "MIT" }
@@ -32,11 +40,15 @@ classifiers = [
 dependencies = []
 
 [project.urls]
-Homepage = "https://github.com/kgodwin/pi-bake"
-Issues   = "https://github.com/kgodwin/pi-bake/issues"
+Homepage = "https://github.com/kurt-cb/pi-bake"
+Issues   = "https://github.com/kurt-cb/pi-bake/issues"
 
 [project.scripts]
 pi-bake = "pi_bake.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools_scm]
+# Tags like `v0.0.4` map to version `0.0.4`. Untagged commits get
+# a dev suffix (0.0.5.dev3+g<sha>), which pip + PyPI both accept.
