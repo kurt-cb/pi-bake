@@ -195,9 +195,21 @@ def _write_apkovl(out: Path, node: NodeConfig) -> None:
     # LBU_MEDIA set, `lbu commit` and even `lbu status` just print
     # usage. mmcblk0 is the SD card's FAT partition, mounted at
     # /media/mmcblk0 by Alpine RPi init.
+    #
+    # BACKUP_LIMIT=3 turns on lbu's built-in apkovl rotation: each
+    # commit shifts the previous apkovl to `<host>.apkovl.tar.gz.0`,
+    # then `.1`, then `.2`, dropping the oldest beyond 3. The `.N`
+    # suffix doesn't match the bootloader's `*.apkovl.tar.gz` glob,
+    # so old backups sit on FAT without being mis-loaded — unlike a
+    # manual `cp foo.apkovl.tar.gz foo.bak` which DID confuse the
+    # loader on at least one occasion (operator had to power-cycle
+    # + rename to recover).
     members.append((
         "etc/lbu/lbu.conf",
-        b'LBU_MEDIA="mmcblk0"\n',
+        (
+            b'LBU_MEDIA="mmcblk0"\n'
+            b'BACKUP_LIMIT=3\n'
+        ),
         0o644, False,
     ))
 

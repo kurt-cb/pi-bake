@@ -233,6 +233,7 @@ def test_lbu_conf_sets_media(tmp_path):
     with _bake(n, tmp_path) as tf:
         conf = _extract(tf, "etc/lbu/lbu.conf")
     assert "LBU_MEDIA" in conf
+    assert "BACKUP_LIMIT" in conf
     assert "mmcblk0" in conf
 
 
