@@ -18,9 +18,9 @@ from pi_bake.config import NodeConfig
 _PUBKEY = "ssh-ed25519 AAAA primary"
 
 
-def _bake(node: NodeConfig, tmp_path) -> tarfile.TarFile:
+def _bake(node: NodeConfig, tmp_path, **kw) -> tarfile.TarFile:
     out = tmp_path / "node.apkovl.tar.gz"
-    _write_apkovl(out, node)
+    _write_apkovl(out, node, **kw)
     return tarfile.open(out, "r:gz")
 
 
@@ -250,14 +250,56 @@ def test_sshd_config_omits_unsupported_directives(tmp_path):
     assert "ChallengeResponseAuthentication" not in cfg
 
 
-def test_no_firstboot_script(tmp_path):
+def test_no_firstboot_script_when_no_extras(tmp_path):
     """v0.1.x used a /etc/local.d/pi-bake-firstboot.start that did
-    `apk update && apk add ...` on first boot. That broke whenever
-    the Pi had no network at boot (every time, on a fresh deployment)
-    or wrong clock (every Pi, no RTC). v0.1.x onward installs from
-    the local /apks cache via /etc/apk/world — no firstboot dance."""
+    `apk update && apk add ...` unconditionally. That broke whenever
+    the Pi had no network at boot or wrong clock (no RTC). v0.1.x
+    onward installs the baseline from /apks cache via /etc/apk/world.
+
+    The `local` runlevel + /etc/local.d/install-extras.start ONLY
+    appears when `extra_packages` is non-empty (v0.0.9+). With no
+    extras + no wifi, both stay absent."""
     n = NodeConfig(hostname="pi", ssh_pubkey=_PUBKEY)
     with _bake(n, tmp_path) as tf:
         names = set(tf.getnames())
     assert "etc/local.d/pi-bake-firstboot.start" not in names
+    assert "etc/local.d/install-extras.start" not in names
     assert "etc/runlevels/default/local" not in names
+
+
+def test_extra_packages_NOT_in_world(tmp_path):
+    """Regression for the v0.0.8 DHCP bug. Alpine init's first-boot
+    `apk add --root $sysroot --no-network $world` FAILS WHOLESALE if
+    any package in /etc/apk/world isn't in the local /apks cache
+    (stock RPi tarball only ships ~150 packages — no avahi, dbus,
+    linux-firmware-intel, etc.). That whole-transaction failure left
+    dhcpcd uninstalled → no DHCP → 169.x APIPA on first boot.
+
+    v0.0.9 fix: extras go to /etc/local.d/install-extras.start which
+    runs ONLINE after dhcpcd has converged. /etc/apk/world stays
+    baseline-only."""
+    n = NodeConfig(hostname="pi", ssh_pubkey=_PUBKEY)
+    extras = ["avahi", "dbus", "linux-firmware-intel"]
+    with _bake(n, tmp_path, extra_packages=extras) as tf:
+        world = set(_extract(tf, "etc/apk/world").split())
+        names = set(tf.getnames())
+    for pkg in extras:
+        assert pkg not in world, f"{pkg} leaked into /etc/apk/world"
+    assert "etc/local.d/install-extras.start" in names
+    assert "etc/runlevels/default/local" in names
+
+
+def test_install_extras_script_runs_apk_add(tmp_path):
+    """The install-extras.start script must invoke `apk add` with the
+    declared extras, wait for network convergence, and self-disable
+    on success so re-runs are no-ops."""
+    n = NodeConfig(hostname="pi", ssh_pubkey=_PUBKEY)
+    with _bake(n, tmp_path, extra_packages=["avahi", "dbus"]) as tf:
+        script = _extract(tf, "etc/local.d/install-extras.start")
+    assert script.startswith("#!/bin/sh")
+    assert "apk add avahi dbus" in script
+    # Network-convergence wait — must not fire apk add against a
+    # network that hasn't come up yet.
+    assert "ip route get" in script
+    # Self-disable marker — second boot should be a no-op.
+    assert "install-extras.done" in script

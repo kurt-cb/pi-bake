@@ -347,23 +347,60 @@ def _write_apkovl(
             "iw",
             "ifupdown-ng-wifi",
         ]
-    # Operator-declared extras (YAML `packages:` list). De-dup against
-    # the baseline so explicit `avahi` in YAML doesn't double-list with
-    # something we add unconditionally. Sort the extras for stable
-    # output (helps `diff` between bakes). Today, anything NOT in the
-    # stock RPi /apks cache (avahi, dbus, linux-firmware-intel, etc.)
-    # requires the Pi to have working network on first boot — init
-    # falls back to the upstream Alpine repo. Bake-time cache
-    # enrichment (the air-gap story) is a v0.3 ROADMAP item.
-    baseline = set(world_pkgs)
-    for pkg in sorted(set(extra_packages or [])):
-        if pkg not in baseline:
-            world_pkgs.append(pkg)
+    # /etc/apk/world: ONLY packages in the stock RPi /apks cache.
+    # Alpine init's first-boot does `apk add --no-network $world`
+    # — if ANY package isn't in the cache, the entire transaction
+    # fails wholesale (no dhcpcd, no sshd installed). Operator-
+    # declared extras (`packages:` in YAML — avahi, dbus,
+    # linux-firmware-*, etc.) are NOT in the stock cache; they go
+    # into a separate first-boot script instead (below) that runs
+    # AFTER the network is up.
     members.append((
         "etc/apk/world",
         ("\n".join(world_pkgs) + "\n").encode(),
         0o644, False,
     ))
+
+    # /etc/local.d/install-extras.start — online apk add for extras.
+    # Runs at boot via OpenRC `local` service, AFTER dhcpcd has
+    # brought eth0 up (default runlevel order:
+    # sysinit → boot → default → local last). Self-disables on
+    # success so re-runs are no-ops. If network is down, exits
+    # non-zero so OpenRC logs the failure visibly; runs again next
+    # boot. This is the today-fix for the no-bake-time-fetch gap —
+    # v0.3 bake-time apk-fetch makes the device truly air-gappable
+    # by enriching /apks at bake time instead.
+    extras = sorted(set(extra_packages or []))
+    if extras:
+        pkgs_arg = " ".join(extras)
+        install_extras_sh = (
+            "#!/bin/sh\n"
+            "# Written by pi-bake — install operator-declared `packages:`\n"
+            "# extras AFTER the network is up. Stock RPi /apks cache only\n"
+            "# carries the baseline (sshd/dhcpcd/chrony/etc.); anything\n"
+            "# in YAML `packages:` lands here for online apk add.\n"
+            "DONE=/var/lib/pi-bake/install-extras.done\n"
+            "[ -f \"$DONE\" ] && exit 0\n"
+            "# Wait up to 60s for a working route (dhcpcd convergence)\n"
+            "for i in $(seq 1 60); do\n"
+            "    ip route get 1.1.1.1 >/dev/null 2>&1 && break\n"
+            "    sleep 1\n"
+            "done\n"
+            "apk update 2>&1 || true\n"
+            f"if apk add {pkgs_arg} 2>&1; then\n"
+            "    mkdir -p /var/lib/pi-bake\n"
+            "    touch \"$DONE\"\n"
+            "    exit 0\n"
+            "else\n"
+            "    echo 'install-extras: apk add failed — will retry next boot' >&2\n"
+            "    exit 1\n"
+            "fi\n"
+        )
+        members.append((
+            "etc/local.d/install-extras.start",
+            install_extras_sh.encode(),
+            0o755, False,
+        ))
 
     # /etc/dhcpcd.conf — dhcpcd default config does NOT send DHCP
     # option 12 (hostname); the `hostname` directive on its own
@@ -445,11 +482,15 @@ def _write_apkovl(
     runlevel_svcs = ["networking", "sshd", "chronyd"]
     if not node.has_static_ip:
         runlevel_svcs.append("dhcpcd")
+    # `local` runs scripts in /etc/local.d/*.start at boot — needed
+    # both for the wlan power-save fix (when wifi is on) AND for
+    # the install-extras.start online apk-add (when packages: has
+    # non-stock entries). Adding `local` to the default runlevel is
+    # idempotent so we add it whenever either condition fires.
+    if node.has_wifi or extra_packages:
+        runlevel_svcs.append("local")
     if node.has_wifi:
         runlevel_svcs.append("wpa_supplicant")
-        # `local` runs scripts in /etc/local.d/*.start at boot —
-        # we use it for the wlan power-save-off fix above.
-        runlevel_svcs.append("local")
     for svc in runlevel_svcs:
         members.append((
             f"etc/runlevels/default/{svc}",
