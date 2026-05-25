@@ -63,6 +63,26 @@ class NodeConfig:
     # synthesized placeholder. Useful for exercising mDNS-based
     # hostname recovery paths on the DHCP server side.
     dhcp_send_hostname: bool = True
+    # SSH host keypair baked into /etc/ssh/. Both bytes-fields set
+    # together OR both empty.
+    #
+    # Empty (default): the baker generates a fresh ed25519 host
+    # keypair at bake time and embeds it. Stable across reflashes
+    # of the SAME .img.gz (a property the default sshd-regenerates-
+    # on-first-boot path doesn't give); changes on each new
+    # `pi-bake build`. Useful when an operator flashes one image
+    # onto many SD cards and doesn't want each card to look like a
+    # different host to known_hosts.
+    #
+    # Set: operator-managed host identity, stable across `pi-bake
+    # build` invocations forever — no `known_hosts` warnings on
+    # re-bake. The bytes are the literal OpenSSH-format private and
+    # public key file contents. Key type is auto-detected from the
+    # pubkey's first word (ssh-ed25519 / ssh-rsa / ecdsa-sha2-*),
+    # and the files land at /etc/ssh/ssh_host_<type>_key{,.pub}
+    # with 600/644 perms.
+    ssh_host_key_priv: bytes = b""
+    ssh_host_key_pub: bytes = b""
 
     def __post_init__(self) -> None:
         # Hostname must be a DNS label.
@@ -95,6 +115,38 @@ class NodeConfig:
                 f"static_ipv4 must be CIDR form (e.g. 192.168.4.111/24); "
                 f"got {self.static_ipv4!r}"
             )
+        # SSH host key: both halves or neither.
+        if bool(self.ssh_host_key_priv) != bool(self.ssh_host_key_pub):
+            raise ValueError(
+                "ssh_host_key_priv + ssh_host_key_pub must both be set "
+                "or both empty"
+            )
+        if self.ssh_host_key_pub:
+            first = self.ssh_host_key_pub.split(None, 1)[0].decode(errors="replace")
+            if not (first == "ssh-ed25519" or first == "ssh-rsa"
+                    or first.startswith("ecdsa-sha2-")):
+                raise ValueError(
+                    f"ssh_host_key_pub first field {first!r} isn't an "
+                    f"OpenSSH key type — expected ssh-ed25519, ssh-rsa, "
+                    f"or ecdsa-sha2-*"
+                )
+
+    @property
+    def ssh_host_key_type(self) -> str:
+        """`ed25519` | `rsa` | `ecdsa` — the type segment for
+        /etc/ssh/ssh_host_<type>_key filename. Empty when no key
+        is set (auto-gen path)."""
+        if not self.ssh_host_key_pub:
+            return ""
+        first = self.ssh_host_key_pub.split(None, 1)[0].decode(errors="replace")
+        if first == "ssh-ed25519":
+            return "ed25519"
+        if first == "ssh-rsa":
+            return "rsa"
+        if first.startswith("ecdsa-sha2-"):
+            return "ecdsa"
+        # Unreachable thanks to __post_init__, but defensive.
+        return ""
 
     @property
     def all_pubkeys(self) -> list[str]:

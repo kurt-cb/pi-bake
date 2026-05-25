@@ -36,7 +36,7 @@ If a downstream project needs a pi-bake feature, capture it in
 that pi-bake can address it in its own focused session. Don't
 just bolt it on.
 
-## Current state (as of v0.0.9)
+## Current state (as of v0.2)
 
 ### What ships
 
@@ -55,17 +55,34 @@ just bolt it on.
   /etc/apk/repositories.
 - **Pi Zero W BCM43438 power-save fix** — auto-baked
   `/etc/local.d/wlan-power-save-off.start` when wifi is on.
+- **Bake-time apk-fetch (v0.2 — air-gap)** — `apk_fetch: true`
+  in YAML / `--apk-fetch` on CLI pulls every `packages:` entry
+  + recursive deps from upstream Alpine at BAKE time via
+  apk-tools-static (auto-downloaded to `~/.cache/pi-bake/`),
+  stages .apk files into FAT at `/apks/<arch>/extras/`. First-
+  boot install runs offline (`apk add --no-network
+  --allow-untrusted`). Pi never needs internet. See `alpine.py`
+  + `apkfetch.py`.
+- **Pre-baked SSH host keys (v0.2)** — `ssh_host_key: <path>`
+  in YAML / `--ssh-host-key PATH` on CLI bakes the operator's
+  ed25519/rsa/ecdsa pair (private from PATH, public from
+  `<path>.pub`) into `/etc/ssh/ssh_host_<type>_key{,.pub}` so
+  the Pi's SSH identity stays stable across rebuilds — no
+  `known_hosts` churn. When unset, pi-bake auto-generates a
+  fresh ed25519 pair at bake time (stable across reflashes of
+  the same `.img.gz`, changes per `pi-bake build`).
 - **Annotated reference** at `pi-bake.example.yaml` (every
   field documented; dnsmasq-style).
 - **Tested examples** under `examples/` for the common shapes.
 
 ### Known constraints
 
-- **First boot needs network for `packages:` extras** — see the
-  "Apkovl world vs extras" lesson below. Air-gap deployment is
-  the v0.3 ROADMAP item.
-- **No pre-baked SSH host keys** — every reflash regenerates,
-  triggering `known_hosts` warnings. v0.2 ROADMAP item.
+- **Bake-time apk-fetch installs extras POST-sshd** — first-
+  boot install runs from `local.d` (after `default` runlevel
+  comes up). For appliances that need extras installed BEFORE
+  sshd starts (e.g. firmware blobs loaded before networking),
+  init-time install via signed APKINDEX is a v0.3+ ROADMAP item.
+  The boot flow analysis is in `apkfetch.py`'s docstring.
 - **No HAT catalog / config.txt overlay machinery** — operators
   who need a HAT-specific `dtoverlay=` edit `config.txt`
   manually post-bake or via pyinfra. v0.3 ROADMAP item.
@@ -94,10 +111,15 @@ no sshd, 169.x APIPA, unreachable device.
 
 - `/etc/apk/world` holds ONLY the baseline (everything in stock
   cache). First-boot apk-add succeeds wholesale.
-- Operator-declared extras (`packages:` in YAML) → write to
-  `/etc/local.d/install-extras.start`. Runs at boot via OpenRC
-  `local` (last in default runlevel), AFTER dhcpcd has brought
-  the network up. `apk update && apk add <extras>` online.
+- Operator-declared extras (`packages:` in YAML) → `/etc/local.d/
+  install-extras.start`. Runs at boot via OpenRC `local` (last
+  in default runlevel), AFTER dhcpcd has brought the network up.
+  Two flavors:
+  - Default (`apk_fetch: false`): `apk update && apk add <extras>`
+    online. Pi needs internet on first boot.
+  - `apk_fetch: true` (v0.2): bake pulled .apks into FAT at
+    `/apks/<arch>/extras/`. Script does `apk add --no-network
+    --allow-untrusted <files>`. Pi never needs internet.
 - Self-disables on success via `/var/lib/pi-bake/install-extras.done`.
 
 Trade-off: extras still need network on first boot. v0.3
@@ -208,31 +230,38 @@ src/pi_bake/
 ├── config.py       # NodeConfig — per-Pi inputs that go into the bake
 ├── recipe.py       # YAML recipe (Recipe dataclass + load/dump/round-trip)
 ├── alpine.py       # Alpine baker — _write_apkovl + bake() + mtools helpers
+├── apkfetch.py     # Bake-time apk-fetch (air-gap) — apk-tools-static
+│                   # download + cross-arch fetch + initramfs key extraction
 ├── raspbian.py     # Raspbian/Debian baker (stub for v0.2)
 ├── bake.py         # Top-level dispatch — picks backend by OS
 ├── download.py     # URL fetch + cache + sha256 verify
 └── cli.py          # argparse + subcommands (list-boards/list-os/build)
 
 tests/
-├── test_apkovl.py  # apkovl tarball shape (36 tests; tests/ goes here)
+├── test_apkovl.py   # apkovl tarball shape (apkovl tests go here)
+├── test_apkfetch.py # apk-tools-static download + initramfs key
+│                    # extract + cross-arch fetch (integration tests
+│                    # gated behind PI_BAKE_INTEGRATION=1)
 ├── test_catalogs.py
 ├── test_config.py
-└── test_recipe.py  # YAML round-trip + schema validation
+└── test_recipe.py   # YAML round-trip + schema validation
 ```
 
 **Hot file is `alpine.py`.** Most lessons above land changes
-here.
+here. `apkfetch.py` is the second hot file (v0.2+).
 
 **Design constraint:** stdlib + PyYAML at the Python level.
-System dependency: `mtools` + `dosfstools` on PATH. No root
-needed for Alpine baker. Raspbian backend (v0.2) will need
-sudo for losetup.
+System deps: `mtools` + `dosfstools` always; `tar` + `cpio`
+when `apk_fetch: true`; `ssh-keygen` for SSH host key auto-gen.
+No root needed for Alpine baker. Raspbian backend (v0.2) will
+need sudo for losetup.
 
 ## Testing
 
 ```
 cd ~/pi-bake
-python3 -m pytest -q       # ~60+ tests, all unit, ~0.2s
+python3 -m pytest -q              # ~85 unit tests, <1s
+PI_BAKE_INTEGRATION=1 pytest -q   # +network/upstream apk fetch
 ```
 
 Every "lesson" above has a regression test in `tests/test_apkovl.py`
@@ -257,12 +286,26 @@ When making a non-trivial change to the apkovl:
    ```
 3. Reason about the boot flow:
    - apkovl extracts to sysroot
-   - init's `apk add --no-network $world` — must succeed
+   - init's `cp -a /etc/apk/keys $sysroot/etc/apk` (line ~936 of
+     `boot/initramfs-rpi/init`) merges Alpine devel pubkeys with
+     anything the apkovl provided at `etc/apk/keys/`
+   - init's `apk add --root $sysroot --no-network $world` — must
+     succeed; world is baseline-only by design (see lesson 1)
    - runlevels start: networking → sshd → chronyd → dhcpcd (→ local)
-   - `local` runs `/etc/local.d/*.start` — extras install online
+   - `local` runs `/etc/local.d/*.start`:
+     - `install-extras.start` — online apk add (default) OR offline
+       `apk add --no-network --allow-untrusted` against bake-staged
+       .apks (when `apk_fetch: true`)
+     - `wlan-power-save-off.start` (wifi only)
    - sshd reachable + dhcpcd has lease
 
 If any step would fail, the apkovl is wrong.
+
+4. For apk_fetch bakes, verify the FAT staging too:
+   ```
+   mdir -i x.img ::/apks/aarch64/extras 2>&1 | head -20
+   ```
+   Operator extras (+ recursive deps) should all be there.
 
 ## Release flow
 

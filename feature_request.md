@@ -12,49 +12,6 @@ When implementing: move the entry to the v0.X section of
 
 ## Open requests
 
-### Bake-time apk-fetch (air-gap appliance support)
-
-**From:** totaldns hardware-lab — 2026-05-25.
-
-**The gap:** v0.0.9 splits operator-declared `packages:` into
-`/etc/local.d/install-extras.start` so they install ONLINE after
-dhcpcd brings the network up. For an **air-gapped appliance**
-("the device will never see the internet"), every operator
-package + its recursive deps must be in the bake-time
-`/media/mmcblk0/apks/` cache so init's `apk add --no-network`
-covers everything.
-
-**Use case driving it:** totaldns shipping as an appliance to
-customers who plug it into their LAN. If the LAN is offline
-when the device first boots (operator brings the appliance up
-before connecting upstream), avahi/dbus/linux-firmware-intel
-never install → no mDNS / no BE200 / no DBus-using services.
-Has to Just Work offline.
-
-**Implementation sketch:**
-1. Auto-download `apk-tools-static` into `~/.cache/pi-bake/`
-   on first bake-with-packages. Works on any Linux host without
-   requiring system `apk-tools`. Reused subsequent bakes.
-2. `_extra_apks_fetch()` in `alpine.py`:
-   - `apk.static --arch <target> --root <stage> fetch --recursive
-     -X <repo-url> <pkg...>`
-   - Writes `.apk` files into `<stage>/var/cache/apk/`
-   - Move to FAT image's `/apks/<arch>/`
-3. Regenerate or augment APKINDEX so init's `apk add` finds
-   them. Sign with a bake-time-generated key whose pubkey gets
-   baked into `/etc/apk/keys/` in the apkovl.
-4. Honor `os_version: edge` — fetch from edge repos when the
-   recipe asks for edge.
-
-**Removes:** the network-required-on-first-boot constraint from
-`packages:`. `/etc/local.d/install-extras.start` either becomes
-empty or stays as a fallback for last-minute additions.
-
-**Tracking:** referenced in [ROADMAP.md](ROADMAP.md) under
-"v0.3 — Bake-time apk-fetch". Detailed implementation deferred
-until a focused pi-bake session can do the APKINDEX format +
-signing work end-to-end.
-
 ### "pibakehub" — community recipe registry
 
 **From:** totaldns operator — 2026-05-25.
@@ -137,24 +94,6 @@ it stays out of pi-bake.
 **When to land:** when at least two downstream projects ask
 for it (so the abstraction is informed by more than one
 workflow).
-
-### Pre-baked SSH host keys
-
-**From:** general operator pain — every reflash regenerates
-`/etc/ssh/ssh_host_*_key{,.pub}` → operator's `known_hosts`
-flags the rebuilt Pi as "REMOTE HOST IDENTIFICATION HAS
-CHANGED" → pyinfra needs `-o StrictHostKeyChecking=no`.
-
-**Already in ROADMAP** under "v0.2 — Pre-baked SSH host keys".
-The macmpi/alpine-linux-headless-bootstrap pattern: drop
-`ssh_host_*_key{,.pub}` on FAT root, apkovl restore copies
-them into `/etc/ssh/` at 600/644.
-
-**CLI shape:** `--ssh-host-key PATH` to reuse an
-operator-managed identity across reflashes (preferred — gives
-operator control). Auto-generated per-hostname pair as the
-secondary path (no operator action needed; downside: still
-changes per `pi-bake build`).
 
 ### HAT catalog + config.txt overlays
 

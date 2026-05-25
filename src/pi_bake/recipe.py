@@ -49,8 +49,8 @@ except ImportError as e:   # pragma: no cover
 
 _TOP_KEYS = frozenset({
     "hostname", "board", "os", "os_version", "timezone",
-    "ssh_pubkey", "extra_pubkeys",
-    "network", "wifi", "packages", "output",
+    "ssh_pubkey", "extra_pubkeys", "ssh_host_key",
+    "network", "wifi", "packages", "apk_fetch", "output",
 })
 _NETWORK_KEYS = frozenset({"mode", "address", "gateway", "send_hostname"})
 _WIFI_KEYS    = frozenset({"ssid", "psk", "country"})
@@ -139,10 +139,32 @@ class Recipe:
     paths are detected by '~/' prefix or being a real existing
     file. Mixed list allowed.
 
-    `packages`: extra apk package names appended to
-    `/etc/apk/world` (Alpine only). Today these require network
-    on first boot when not in the stock /apks cache — bake-time
-    cache enrichment is a v0.3 ROADMAP item.
+    `packages`: extra apk package names. Behavior depends on
+    `apk_fetch` (below):
+    - `apk_fetch: false` (default): installed at first boot from
+      upstream Alpine repos — Pi needs internet on first boot.
+    - `apk_fetch: true`: fetched + recursive deps at BAKE TIME,
+      staged into the FAT image, installed offline on first boot.
+
+    `apk_fetch`: opt-in air-gap support (Alpine only, v0.2). When
+    true and `packages:` is non-empty, the baker runs apk-tools-
+    static against upstream Alpine repos to download the package
+    set + all recursive deps, stages them at
+    `/media/mmcblk0/apks/<arch>/extras/` on the FAT partition, and
+    the first-boot script installs them with `apk add --no-network
+    --allow-untrusted`. No internet needed on the Pi. Bake-time
+    requirements: network access to dl-cdn.alpinelinux.org,
+    `tar` + `cpio` on the bake host.
+
+    `ssh_host_key`: path to an OpenSSH private key (e.g.
+    `~/.ssh/host-keys/td-pi5-1.ed25519`). The matching public key
+    is read from `<path>.pub`. When set, the keypair is baked
+    into `/etc/ssh/ssh_host_<type>_key{,.pub}` so the Pi's SSH
+    identity is stable across reflashes — no `known_hosts`
+    "REMOTE HOST IDENTIFICATION HAS CHANGED" warnings on rebuild.
+    Empty (default): the baker generates a fresh ed25519 pair at
+    bake time. Stable across reflashes of the same .img.gz;
+    changes on each new `pi-bake build`.
     """
     hostname: str
     board: str
@@ -155,6 +177,8 @@ class Recipe:
     network: NetworkSpec = field(default_factory=NetworkSpec)
     wifi: WifiSpec | None = None
     packages: list[str] = field(default_factory=list)
+    apk_fetch: bool = False
+    ssh_host_key: str = ""
 
 
 # --------------------------------------------------------------------------- #
@@ -230,6 +254,13 @@ def _from_dict(d: dict, *, source: str = "<dict>") -> Recipe:
     if not all(isinstance(p, str) for p in packages):
         raise ValueError(f"{source}: every entry in `packages` must be a string")
 
+    apk_fetch_raw = d.get("apk_fetch", False)
+    if not isinstance(apk_fetch_raw, bool):
+        raise ValueError(
+            f"{source}: `apk_fetch` must be a boolean, "
+            f"got {type(apk_fetch_raw).__name__}"
+        )
+
     return Recipe(
         hostname=d["hostname"],
         board=d["board"],
@@ -242,6 +273,8 @@ def _from_dict(d: dict, *, source: str = "<dict>") -> Recipe:
         network=network,
         wifi=wifi,
         packages=list(packages),
+        apk_fetch=apk_fetch_raw,
+        ssh_host_key=d.get("ssh_host_key") or "",
     )
 
 
@@ -277,6 +310,11 @@ def dump_recipe(r: Recipe) -> str:
         lines.append("extra_pubkeys:")
         for k in r.extra_pubkeys:
             lines.append(f"  - {_yaml_str(k)}")
+    if r.ssh_host_key:
+        lines.append("")
+        lines.append("# Stable SSH host identity (private key on bake host;")
+        lines.append("# matching .pub at <path>.pub). Avoids known_hosts churn.")
+        lines.append(f"ssh_host_key: {_yaml_str(r.ssh_host_key)}")
     lines.append("")
     lines.append("# eth0 — mode dhcp or static")
     lines.append("network:")
@@ -298,6 +336,10 @@ def dump_recipe(r: Recipe) -> str:
         lines.append("packages:")
         for p in r.packages:
             lines.append(f"  - {_yaml_str(p)}")
+    if r.apk_fetch:
+        lines.append("")
+        lines.append("# Bake-time apk-fetch: stage extras + deps offline.")
+        lines.append("apk_fetch: true")
     lines.append("")
     lines.append("# Where the .img.gz lands")
     lines.append("output:")
@@ -347,6 +389,23 @@ def recipe_to_node_config(r: Recipe):
     primary = _resolve_pubkey(r.ssh_pubkey)
     extras = [_resolve_pubkey(k) for k in r.extra_pubkeys]
 
+    priv_bytes = b""
+    pub_bytes = b""
+    if r.ssh_host_key:
+        priv_path = Path(r.ssh_host_key).expanduser()
+        pub_path = Path(str(priv_path) + ".pub")
+        if not priv_path.is_file():
+            raise ValueError(
+                f"ssh_host_key private key not found: {priv_path}"
+            )
+        if not pub_path.is_file():
+            raise ValueError(
+                f"ssh_host_key public key not found: {pub_path} "
+                f"(expected at <ssh_host_key>.pub)"
+            )
+        priv_bytes = priv_path.read_bytes()
+        pub_bytes = pub_path.read_bytes()
+
     node = NodeConfig(
         hostname=r.hostname,
         ssh_pubkey=primary,
@@ -358,6 +417,8 @@ def recipe_to_node_config(r: Recipe):
         static_ipv4=r.network.address if r.network.mode == "static" else "",
         gateway_ipv4=r.network.gateway if r.network.mode == "static" else "",
         dhcp_send_hostname=r.network.send_hostname,
+        ssh_host_key_priv=priv_bytes,
+        ssh_host_key_pub=pub_bytes,
     )
 
     build_kwargs = {
@@ -366,6 +427,7 @@ def recipe_to_node_config(r: Recipe):
         "version": r.os_version or None,
         "out_path": str(Path(r.output.path).expanduser()),
         "extra_packages": list(r.packages),
+        "apk_fetch": r.apk_fetch,
     }
     if r.output.image_size_mb:
         build_kwargs["image_size_mb"] = r.output.image_size_mb

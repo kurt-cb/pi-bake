@@ -71,6 +71,22 @@ output:
 #   - ~/.ssh/operator-laptop.pub
 #   - "ssh-ed25519 AAAA... pyinfra@runner"
 
+# Stable SSH host identity. Path to an OpenSSH private key file on
+# the bake host; the matching public key is read from <path>.pub.
+# Baked into /etc/ssh/ssh_host_<type>_key{,.pub} so the Pi's SSH
+# fingerprint stays the same across rebuilds — no
+# "REMOTE HOST IDENTIFICATION HAS CHANGED" warnings, no
+# pyinfra -o StrictHostKeyChecking=no needed. Generate once with:
+#   ssh-keygen -t ed25519 -N '' \
+#     -f ~/.ssh/pi-host-keys/td-pi5-1 \
+#     -C "host@td-pi5-1"
+# then back the directory up. Key type is detected from the pubkey
+# (ssh-ed25519 / ssh-rsa / ecdsa-sha2-*).
+#
+# Omit to let pi-bake auto-generate a fresh ed25519 pair per bake
+# (stable across reflashes of the same .img.gz; changes per build).
+# ssh_host_key: ~/.ssh/pi-host-keys/td-pi5-1
+
 # --------------------------------------------------------------------------
 # NETWORK (eth0)
 # --------------------------------------------------------------------------
@@ -114,25 +130,33 @@ network:
 # --------------------------------------------------------------------------
 # PACKAGES — extras beyond the stock RPi tarball cache
 # --------------------------------------------------------------------------
-# apk packages appended to /etc/apk/world. On first boot, Alpine
-# init's `apk add` installs them.
+# apk packages installed on first boot. Two flavors driven by
+# `apk_fetch` below:
 #
-# IMPORTANT (today): packages NOT in the stock RPi tarball /apks
-# cache require the Pi to have working network on first boot —
-# init falls back to the upstream Alpine repos (controlled by
-# `os_version` above; edge = rolling, anything else = stable).
+#   apk_fetch: false  (default — online first boot)
+#     A `/etc/local.d/install-extras.start` script runs after dhcpcd
+#     converges and does `apk add <pkgs>` against upstream Alpine.
+#     The Pi MUST reach the internet on first boot. Works fine for
+#     a normal LAN-connected deploy.
 #
-# Bake-time apk-fetch (enriching the local /apks cache so the
-# device boots fully provisioned offline) is a v0.3 ROADMAP item.
-# See pi-bake's ROADMAP.md for status.
+#   apk_fetch: true  (v0.2 — offline first boot, air-gap appliances)
+#     pi-bake fetches the package set + recursive deps at BAKE time
+#     using apk-tools-static against upstream Alpine, stages the
+#     .apk files into the FAT image at
+#     `/media/mmcblk0/apks/<arch>/extras/`, and the first-boot
+#     script installs them with `apk add --no-network --allow-
+#     untrusted`. Device boots fully provisioned with no internet.
+#     Bake host needs network + tar + cpio + the ability to
+#     download apk-tools-static once.
 #
-# Stock packages (free to list — already in the cache):
+# Stock packages (free to list — already in the FAT cache, no
+# fetch needed):
 #   alpine-base, openssh-server, openssh-server-common-openrc,
 #   openssh-sftp-server, openssh-client-default, dhcpcd,
 #   dhcpcd-openrc, chrony, chrony-openrc, wpa_supplicant,
 #   wpa_supplicant-openrc, iw, ifupdown-ng-wifi.
 #
-# Common extras that DO need network on first boot today:
+# Common extras NOT in the stock cache:
 #   avahi, avahi-tools, dbus, py3-pydbus  → mDNS bridge
 #   linux-firmware-brcm                    → Pi onboard WiFi
 #   linux-firmware-intel                   → Intel BE200 (needs os_version: edge)
@@ -143,3 +167,8 @@ network:
 #   - dbus
 #   - py3-pydbus
 #   - linux-firmware-brcm
+
+# Enable bake-time apk-fetch for air-gap appliance use. Pulls every
+# package above (+ recursive deps) into the FAT image at bake time
+# so the Pi installs them offline on first boot. Default false.
+# apk_fetch: true

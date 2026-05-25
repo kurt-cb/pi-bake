@@ -32,14 +32,18 @@ def build(
     node: NodeConfig, out_path: str | Path,
     image_size_mb: int | None = None,
     extra_packages: list[str] | None = None,
+    apk_fetch: bool = False,
 ) -> Path:
     """Build an `.img.gz` for `(board, os, version, node)`.
 
     `version=None` → use the OS's latest known-good.
     `image_size_mb=None` → backend's default.
     `extra_packages` → list of apk package names appended to
-        `/etc/apk/world` (Alpine only). Today these install on
-        first boot via network when not in the stock /apks cache.
+        `/etc/apk/world` (Alpine only). Default install path
+        requires network on first boot.
+    `apk_fetch` (Alpine only) → if True, fetch extras + recursive
+        deps at BAKE time so the Pi can install them offline on
+        first boot. Default False (preserves v0.0.9 behavior).
 
     Raises:
       - KeyError on unknown board/os.
@@ -75,6 +79,8 @@ def build(
             "url": url, "node": node, "out_path": Path(out_path),
             "alpine_branch": alpine_branch,
             "extra_packages": extra_packages,
+            "arch": b.arch,
+            "apk_fetch": apk_fetch,
         }
         if image_size_mb is not None:
             kwargs["image_size_mb"] = image_size_mb

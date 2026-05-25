@@ -303,3 +303,140 @@ def test_install_extras_script_runs_apk_add(tmp_path):
     assert "ip route get" in script
     # Self-disable marker — second boot should be a no-op.
     assert "install-extras.done" in script
+
+
+# --------------------------------------------------------------------------- #
+# SSH host keys — pre-baked identity (v0.2 feature)                            #
+# --------------------------------------------------------------------------- #
+
+def test_ssh_host_key_auto_generated_when_not_provided(tmp_path):
+    """No NodeConfig host key → baker generates a fresh ed25519 pair
+    and embeds it. Stable across reflashes of the same .img.gz."""
+    n = NodeConfig(hostname="pi", ssh_pubkey=_PUBKEY)
+    with _bake(n, tmp_path) as tf:
+        names = set(tf.getnames())
+        pub = _extract(tf, "etc/ssh/ssh_host_ed25519_key.pub")
+        priv = _extract(tf, "etc/ssh/ssh_host_ed25519_key")
+    assert "etc/ssh/ssh_host_ed25519_key" in names
+    assert "etc/ssh/ssh_host_ed25519_key.pub" in names
+    # ssh-keygen ed25519 output is unmistakable.
+    assert pub.startswith("ssh-ed25519 ")
+    assert "pi-bake@pi" in pub
+    assert priv.startswith("-----BEGIN OPENSSH PRIVATE KEY-----")
+
+
+def test_ssh_host_key_perms_strict(tmp_path):
+    """sshd refuses to use a host private key unless its perms are
+    0600. The .pub stays 0644 (world-readable, like any pubkey)."""
+    n = NodeConfig(hostname="pi", ssh_pubkey=_PUBKEY)
+    with _bake(n, tmp_path) as tf:
+        priv = tf.getmember("etc/ssh/ssh_host_ed25519_key")
+        pub = tf.getmember("etc/ssh/ssh_host_ed25519_key.pub")
+    assert priv.mode == 0o600
+    assert pub.mode == 0o644
+
+
+def test_ssh_host_key_provided_pair_is_baked_verbatim(tmp_path):
+    """When NodeConfig supplies the keypair, bake those exact bytes
+    (no rewrite, no regen). Stable across `pi-bake build` runs."""
+    sentinel_priv = b"-----BEGIN OPENSSH PRIVATE KEY-----\nFAKE\n-----END OPENSSH PRIVATE KEY-----\n"
+    sentinel_pub = b"ssh-ed25519 AAAATEST operator-managed@td-pi5-1\n"
+    n = NodeConfig(
+        hostname="pi", ssh_pubkey=_PUBKEY,
+        ssh_host_key_priv=sentinel_priv,
+        ssh_host_key_pub=sentinel_pub,
+    )
+    with _bake(n, tmp_path) as tf:
+        priv = tf.extractfile("etc/ssh/ssh_host_ed25519_key").read()
+        pub = tf.extractfile("etc/ssh/ssh_host_ed25519_key.pub").read()
+    assert priv == sentinel_priv
+    assert pub == sentinel_pub
+
+
+def test_ssh_host_key_rsa_lands_at_rsa_filename(tmp_path):
+    """Key type is derived from the pubkey's first word — an RSA
+    keypair lands at /etc/ssh/ssh_host_rsa_key, not ed25519."""
+    n = NodeConfig(
+        hostname="pi", ssh_pubkey=_PUBKEY,
+        ssh_host_key_priv=b"-----BEGIN OPENSSH PRIVATE KEY-----\nFAKE\n-----END OPENSSH PRIVATE KEY-----\n",
+        ssh_host_key_pub=b"ssh-rsa AAAATEST operator@laptop\n",
+    )
+    with _bake(n, tmp_path) as tf:
+        names = set(tf.getnames())
+    assert "etc/ssh/ssh_host_rsa_key" in names
+    assert "etc/ssh/ssh_host_rsa_key.pub" in names
+    assert "etc/ssh/ssh_host_ed25519_key" not in names
+
+
+def test_ssh_host_key_partial_pair_rejected():
+    """NodeConfig validation: priv + pub both or neither."""
+    with pytest.raises(ValueError, match="both be set or both empty"):
+        NodeConfig(
+            hostname="pi", ssh_pubkey=_PUBKEY,
+            ssh_host_key_priv=b"-----BEGIN ...",
+            ssh_host_key_pub=b"",
+        )
+
+
+def test_ssh_host_key_unknown_type_rejected():
+    """NodeConfig validation: unrecognized pubkey type fails fast."""
+    with pytest.raises(ValueError, match="OpenSSH key type"):
+        NodeConfig(
+            hostname="pi", ssh_pubkey=_PUBKEY,
+            ssh_host_key_priv=b"fake-priv",
+            ssh_host_key_pub=b"dsa-not-supported AAAA test\n",
+        )
+
+
+# --------------------------------------------------------------------------- #
+# Bake-time apk-fetch — air-gap install-extras script (v0.2)                   #
+# --------------------------------------------------------------------------- #
+
+def test_install_extras_offline_when_apk_fetch_used(tmp_path):
+    """With apk_fetch_used=True the install-extras script must use
+    `apk add --no-network --allow-untrusted` against the bake-time-
+    staged .apks in /media/mmcblk0/apks/*/extras/. NEVER `apk update`
+    or talk to the network."""
+    n = NodeConfig(hostname="pi", ssh_pubkey=_PUBKEY)
+    with _bake(n, tmp_path,
+               extra_packages=["avahi", "dbus"],
+               apk_fetch_used=True) as tf:
+        script = _extract(tf, "etc/local.d/install-extras.start")
+    assert script.startswith("#!/bin/sh")
+    # Offline install command.
+    assert "--no-network" in script
+    assert "--allow-untrusted" in script
+    # Points at the bake-time staging dir.
+    assert "/media/mmcblk0/apks/*/extras" in script
+    # Must NOT use the online-install commands the v0.0.9 path uses.
+    assert "apk update" not in script
+    assert "ip route get" not in script
+    # Self-disable marker is still there.
+    assert "install-extras.done" in script
+
+
+def test_install_extras_offline_does_not_list_package_names(tmp_path):
+    """The offline script installs by FILE GLOB, not by package name —
+    package names from `packages:` aren't needed at first-boot time
+    because the .apk files (with all metadata) are already staged."""
+    n = NodeConfig(hostname="pi", ssh_pubkey=_PUBKEY)
+    with _bake(n, tmp_path,
+               extra_packages=["linux-firmware-intel"],
+               apk_fetch_used=True) as tf:
+        script = _extract(tf, "etc/local.d/install-extras.start")
+    # The script is keyed off the staged files, not the recipe pkg list.
+    assert "linux-firmware-intel" not in script
+
+
+def test_install_extras_online_unchanged_when_apk_fetch_off(tmp_path):
+    """Default (apk_fetch_used=False) preserves v0.0.9 online-install
+    behavior. Used when the operator opts OUT of bake-time fetch (or
+    just hasn't opted in yet)."""
+    n = NodeConfig(hostname="pi", ssh_pubkey=_PUBKEY)
+    with _bake(n, tmp_path, extra_packages=["avahi", "dbus"]) as tf:
+        script = _extract(tf, "etc/local.d/install-extras.start")
+    # Online flavor: apk update + apk add by name + ip route wait.
+    assert "apk update" in script
+    assert "apk add avahi dbus" in script
+    assert "--no-network" not in script
+    assert "--allow-untrusted" not in script

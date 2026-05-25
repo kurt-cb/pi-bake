@@ -45,6 +45,8 @@ def bake(
     image_size_mb: int = DEFAULT_IMAGE_SIZE_MB,
     alpine_branch: str = "v3.21",
     extra_packages: list[str] | None = None,
+    arch: str = "aarch64",
+    apk_fetch: bool = False,
 ) -> Path:
     """Build an Alpine RPi `.img.gz` for `node`. Returns out_path.
 
@@ -56,11 +58,20 @@ def bake(
         cache still comes from the tarball.
 
     `extra_packages`: additional apk package names appended to
-        `/etc/apk/world`. On first boot, init's `apk add` installs
-        them. Currently network-required when not in the stock
-        /apks cache (avahi, dbus, linux-firmware-intel etc. are
-        NOT in the stock cache) — bake-time cache enrichment is a
-        v0.3 ROADMAP item.
+        `/etc/apk/world`. Behavior depends on `apk_fetch`:
+        - `apk_fetch=False` (default): packages are installed by a
+          first-boot `local.d` script after dhcpcd brings the
+          network up. Pi must reach the internet on first boot.
+        - `apk_fetch=True`: packages are fetched at BAKE TIME from
+          upstream Alpine repos, staged into the FAT image's
+          `/apks/<arch>/extras/`, and installed by the first-boot
+          script via `apk add --no-network --allow-untrusted`. No
+          internet required on the Pi.
+
+    `arch`: target arch for the Pi (matches `Board.arch` —
+        `aarch64`, `armhf`). Drives cross-arch `apk fetch`.
+
+    `apk_fetch`: opt-in air-gap support. See `extra_packages` above.
     """
     _require_tools("mformat", "mcopy", "mmd")
 
@@ -90,6 +101,32 @@ def bake(
             except TypeError:
                 tf.extractall(extracted)
 
+        # 2.5. Optional: bake-time apk-fetch. Stages operator extras
+        # + recursive deps into the extracted tree's apks/<arch>/
+        # extras/ so the FAT image carries them. First-boot script
+        # then installs offline with --no-network --allow-untrusted.
+        # Without this, extras need the Pi to reach the internet on
+        # first boot (current v0.0.9 default).
+        apk_fetch_used = False
+        if (extra_packages or []) and apk_fetch:
+            from pi_bake import apkfetch
+            LOG.info("bake-time apk-fetch enabled: %d package(s)",
+                     len(extra_packages or []))
+            apk_static = apkfetch.ensure_apk_static()
+            keys_dir = apkfetch.extract_initramfs_keys(
+                extracted, td / "initramfs-keys",
+            )
+            extras_dir = extracted / "apks" / arch / "extras"
+            apkfetch.fetch_packages(
+                apk_static=apk_static,
+                target_arch=arch,
+                alpine_branch=alpine_branch,
+                packages=extra_packages or [],
+                out_dir=extras_dir,
+                keys_dir=keys_dir,
+            )
+            apk_fetch_used = True
+
         # 3. Pour the tree into the FAT32 image.
         LOG.info("mcopy: tarball → image")
         for child in sorted(extracted.iterdir()):
@@ -102,6 +139,7 @@ def bake(
             apkovl_path, node,
             alpine_branch=alpine_branch,
             extra_packages=extra_packages or [],
+            apk_fetch_used=apk_fetch_used,
         )
         _mcopy_into(img, apkovl_path, "/")
 
@@ -160,6 +198,7 @@ def _write_apkovl(
     *,
     alpine_branch: str = "v3.21",
     extra_packages: list[str] | None = None,
+    apk_fetch_used: bool = False,
 ) -> None:
     """Build an Alpine apkovl.tar.gz for `node`.
 
@@ -267,6 +306,31 @@ def _write_apkovl(
     )
     members.append(("etc/ssh/sshd_config", sshd_cfg.encode(), 0o600, False))
 
+    # /etc/ssh/ssh_host_<type>_key{,.pub} — bake a stable SSH host
+    # identity instead of letting sshd's first-boot init regenerate
+    # one. Without this, each reflash makes the operator's
+    # known_hosts flag the rebuilt Pi as "REMOTE HOST IDENTIFICATION
+    # HAS CHANGED" + breaks pyinfra runs that don't set
+    # StrictHostKeyChecking=no. Pair is either operator-provided
+    # (NodeConfig.ssh_host_key_{priv,pub}) — stable across builds —
+    # or auto-generated here as a fresh ed25519 pair, which is at
+    # least stable across reflashes of the same .img.gz.
+    host_priv = node.ssh_host_key_priv
+    host_pub = node.ssh_host_key_pub
+    if not host_priv:
+        host_priv, host_pub = _generate_ed25519_host_key(node.hostname)
+    key_type = _ssh_host_key_type(host_pub)
+    members.append((
+        f"etc/ssh/ssh_host_{key_type}_key",
+        host_priv,
+        0o600, False,
+    ))
+    members.append((
+        f"etc/ssh/ssh_host_{key_type}_key.pub",
+        host_pub,
+        0o644, False,
+    ))
+
     members.append(("root/.ssh/authorized_keys",
                     node.authorized_keys_text().encode(), 0o600, False))
 
@@ -361,41 +425,80 @@ def _write_apkovl(
         0o644, False,
     ))
 
-    # /etc/local.d/install-extras.start — online apk add for extras.
-    # Runs at boot via OpenRC `local` service, AFTER dhcpcd has
-    # brought eth0 up (default runlevel order:
-    # sysinit → boot → default → local last). Self-disables on
-    # success so re-runs are no-ops. If network is down, exits
-    # non-zero so OpenRC logs the failure visibly; runs again next
-    # boot. This is the today-fix for the no-bake-time-fetch gap —
-    # v0.3 bake-time apk-fetch makes the device truly air-gappable
-    # by enriching /apks at bake time instead.
+    # /etc/local.d/install-extras.start — first-boot install of
+    # operator-declared `packages:` extras. Two shapes:
+    #
+    # apk_fetch_used=False (today's default — v0.0.9):
+    #   ONLINE install via `apk add` against upstream Alpine repos.
+    #   Runs at boot via OpenRC `local` service, AFTER dhcpcd has
+    #   brought eth0 up (default runlevel order:
+    #   sysinit → boot → default → local last). Pi must reach the
+    #   internet on first boot. Self-disables on success.
+    #
+    # apk_fetch_used=True (v0.2 air-gap path):
+    #   OFFLINE install. The bake-time apk-fetch stage already
+    #   staged extras + their recursive deps into the FAT image at
+    #   /media/mmcblk0/apks/<arch>/extras/. The script installs
+    #   them via `apk add --no-network --allow-untrusted <files>`
+    #   without touching the network. Device boots fully
+    #   provisioned offline.
+    #
+    # Self-disables either way via /var/lib/pi-bake/install-extras.done
+    # so re-runs are no-ops.
     extras = sorted(set(extra_packages or []))
     if extras:
-        pkgs_arg = " ".join(extras)
-        install_extras_sh = (
-            "#!/bin/sh\n"
-            "# Written by pi-bake — install operator-declared `packages:`\n"
-            "# extras AFTER the network is up. Stock RPi /apks cache only\n"
-            "# carries the baseline (sshd/dhcpcd/chrony/etc.); anything\n"
-            "# in YAML `packages:` lands here for online apk add.\n"
-            "DONE=/var/lib/pi-bake/install-extras.done\n"
-            "[ -f \"$DONE\" ] && exit 0\n"
-            "# Wait up to 60s for a working route (dhcpcd convergence)\n"
-            "for i in $(seq 1 60); do\n"
-            "    ip route get 1.1.1.1 >/dev/null 2>&1 && break\n"
-            "    sleep 1\n"
-            "done\n"
-            "apk update 2>&1 || true\n"
-            f"if apk add {pkgs_arg} 2>&1; then\n"
-            "    mkdir -p /var/lib/pi-bake\n"
-            "    touch \"$DONE\"\n"
-            "    exit 0\n"
-            "else\n"
-            "    echo 'install-extras: apk add failed — will retry next boot' >&2\n"
-            "    exit 1\n"
-            "fi\n"
-        )
+        if apk_fetch_used:
+            install_extras_sh = (
+                "#!/bin/sh\n"
+                "# Written by pi-bake — install bake-time-fetched extras OFFLINE.\n"
+                "# .apk files were staged into FAT at bake time; install with\n"
+                "# --no-network so the Pi never needs upstream connectivity.\n"
+                "# --allow-untrusted because the staged files weren't signed\n"
+                "# by an Alpine-trusted key (they came from upstream verified,\n"
+                "# then re-staged); switching to bake-time-signed APKINDEX is\n"
+                "# a future enhancement (see apkfetch.py docstring).\n"
+                "DONE=/var/lib/pi-bake/install-extras.done\n"
+                "[ -f \"$DONE\" ] && exit 0\n"
+                "EXTRAS=/media/mmcblk0/apks/*/extras\n"
+                "set -- $EXTRAS/*.apk\n"
+                "if [ ! -e \"$1\" ]; then\n"
+                "    echo 'install-extras: no .apk files in '\"$EXTRAS\"' — skipping' >&2\n"
+                "    exit 0\n"
+                "fi\n"
+                "if apk add --no-network --allow-untrusted \"$@\" 2>&1; then\n"
+                "    mkdir -p /var/lib/pi-bake\n"
+                "    touch \"$DONE\"\n"
+                "    exit 0\n"
+                "else\n"
+                "    echo 'install-extras: offline apk add failed — will retry next boot' >&2\n"
+                "    exit 1\n"
+                "fi\n"
+            )
+        else:
+            pkgs_arg = " ".join(extras)
+            install_extras_sh = (
+                "#!/bin/sh\n"
+                "# Written by pi-bake — install operator-declared `packages:`\n"
+                "# extras AFTER the network is up. Stock RPi /apks cache only\n"
+                "# carries the baseline (sshd/dhcpcd/chrony/etc.); anything\n"
+                "# in YAML `packages:` lands here for online apk add.\n"
+                "DONE=/var/lib/pi-bake/install-extras.done\n"
+                "[ -f \"$DONE\" ] && exit 0\n"
+                "# Wait up to 60s for a working route (dhcpcd convergence)\n"
+                "for i in $(seq 1 60); do\n"
+                "    ip route get 1.1.1.1 >/dev/null 2>&1 && break\n"
+                "    sleep 1\n"
+                "done\n"
+                "apk update 2>&1 || true\n"
+                f"if apk add {pkgs_arg} 2>&1; then\n"
+                "    mkdir -p /var/lib/pi-bake\n"
+                "    touch \"$DONE\"\n"
+                "    exit 0\n"
+                "else\n"
+                "    echo 'install-extras: apk add failed — will retry next boot' >&2\n"
+                "    exit 1\n"
+                "fi\n"
+            )
         members.append((
             "etc/local.d/install-extras.start",
             install_extras_sh.encode(),
@@ -533,3 +636,49 @@ def _require_tools(*names: str) -> None:
             f"On Fedora: sudo dnf install mtools dosfstools. "
             f"On Debian/Ubuntu: sudo apt install mtools dosfstools."
         )
+
+
+def _generate_ed25519_host_key(hostname: str) -> tuple[bytes, bytes]:
+    """Generate a fresh ed25519 SSH host keypair via ssh-keygen.
+
+    Returns (priv_bytes, pub_bytes) — exactly what
+    `/etc/ssh/ssh_host_ed25519_key{,.pub}` should contain. Comment
+    encodes the bake host + target hostname so it's identifiable
+    in a known_hosts entry.
+    """
+    if shutil.which("ssh-keygen") is None:
+        raise RuntimeError(
+            "ssh-keygen not on PATH; required for SSH host key auto-gen. "
+            "Install openssh-client (Debian/Ubuntu) or openssh "
+            "(Fedora/Alpine), or pass NodeConfig.ssh_host_key_priv/pub "
+            "to skip auto-generation."
+        )
+    with tempfile.TemporaryDirectory(prefix="pi-bake-hostkey-") as td:
+        priv = Path(td) / "ssh_host_ed25519_key"
+        pub = Path(td) / "ssh_host_ed25519_key.pub"
+        subprocess.run(
+            [
+                "ssh-keygen", "-q", "-t", "ed25519",
+                "-N", "",
+                "-f", str(priv),
+                "-C", f"pi-bake@{hostname}",
+            ],
+            check=True, capture_output=True, text=True,
+        )
+        return priv.read_bytes(), pub.read_bytes()
+
+
+def _ssh_host_key_type(pub: bytes) -> str:
+    """`ed25519` | `rsa` | `ecdsa` — derived from the pubkey's
+    first whitespace-delimited field. Raises on unknown types."""
+    first = pub.split(None, 1)[0].decode(errors="replace")
+    if first == "ssh-ed25519":
+        return "ed25519"
+    if first == "ssh-rsa":
+        return "rsa"
+    if first.startswith("ecdsa-sha2-"):
+        return "ecdsa"
+    raise ValueError(
+        f"SSH host pubkey starts with {first!r}; expected "
+        f"ssh-ed25519, ssh-rsa, or ecdsa-sha2-*"
+    )

@@ -183,6 +183,8 @@ def _cmd_build(args: argparse.Namespace) -> int:
                 if args.wifi_ssid else None
             ),
             packages=list(args.package or []),
+            apk_fetch=args.apk_fetch,
+            ssh_host_key=args.ssh_host_key or "",
             output=OutputSpec(
                 # --to-yaml without --out: emit a sensible placeholder
                 # so the dumped YAML is editable + visibly incomplete
@@ -311,6 +313,22 @@ def _build_parser() -> argparse.ArgumentParser:
         help="extra apk package to install on first boot (repeatable). "
              "Not in stock RPi /apks cache → needs network on first boot "
              "(bake-time cache enrichment is a v0.3 ROADMAP item).",
+    )
+    p_b.add_argument(
+        "--ssh-host-key", metavar="PATH",
+        help="bake this OpenSSH private key (and matching <PATH>.pub) "
+             "into /etc/ssh/ssh_host_<type>_key{,.pub} so the Pi's SSH "
+             "identity is stable across rebuilds — no known_hosts "
+             "'IDENTIFICATION HAS CHANGED' warnings. Omit to let pi-bake "
+             "auto-generate a fresh ed25519 pair per bake.",
+    )
+    p_b.add_argument(
+        "--apk-fetch", action="store_true", default=False,
+        help="bake-time apk-fetch: download --package extras + their "
+             "recursive deps from upstream Alpine repos at BAKE time and "
+             "stage them in the FAT image. First-boot install runs offline "
+             "(no internet needed on the Pi). Required for air-gapped "
+             "appliances. Bake host needs network + tar + cpio.",
     )
     p_b.add_argument(
         "--no-dhcp-hostname",

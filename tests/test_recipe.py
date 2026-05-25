@@ -336,3 +336,128 @@ def test_recipe_edge_version_passes_through():
     )
     _, kwargs = recipe_to_node_config(r)
     assert kwargs["version"] == "edge"
+
+
+# --------------------------------------------------------------------------- #
+# ssh_host_key — operator-managed stable SSH host identity (v0.2)              #
+# --------------------------------------------------------------------------- #
+
+def test_ssh_host_key_yaml_loads_and_round_trips(tmp_path):
+    """ssh_host_key is a top-level YAML field; load + dump preserve it."""
+    pk_file = tmp_path / "key.pub"
+    pk_file.write_text(_PUBKEY + "\n")
+    host_priv = tmp_path / "host_ed25519"
+    host_pub = tmp_path / "host_ed25519.pub"
+    host_priv.write_bytes(b"-----BEGIN OPENSSH PRIVATE KEY-----\nFAKE\n-----END OPENSSH PRIVATE KEY-----\n")
+    host_pub.write_bytes(b"ssh-ed25519 AAAATEST operator@td-pi5-1\n")
+    body = f"""
+hostname: pi-test
+board: pi-5
+os: alpine
+ssh_pubkey: "{_PUBKEY}"
+ssh_host_key: {host_priv}
+output:
+  path: /tmp/pi-test.img.gz
+"""
+    p = tmp_path / "recipe.yaml"
+    p.write_text(body)
+    r1 = load_recipe(p)
+    assert r1.ssh_host_key == str(host_priv)
+    # Round-trip via dump/load.
+    p2 = tmp_path / "round.yaml"
+    p2.write_text(dump_recipe(r1))
+    r2 = load_recipe(p2)
+    assert r2 == r1
+
+
+def test_recipe_to_node_config_ssh_host_key_loads_bytes(tmp_path):
+    """recipe_to_node_config reads the private + public key files
+    pointed at by ssh_host_key and populates NodeConfig.ssh_host_key_*."""
+    host_priv = tmp_path / "host_ed25519"
+    host_pub = tmp_path / "host_ed25519.pub"
+    priv_bytes = b"-----BEGIN OPENSSH PRIVATE KEY-----\nFAKEPRIV\n-----END OPENSSH PRIVATE KEY-----\n"
+    pub_bytes = b"ssh-ed25519 AAAAPUB operator@td-pi5-1\n"
+    host_priv.write_bytes(priv_bytes)
+    host_pub.write_bytes(pub_bytes)
+    r = Recipe(
+        hostname="t", board="pi-5", os="alpine",
+        ssh_pubkey=_PUBKEY,
+        ssh_host_key=str(host_priv),
+        output=OutputSpec(path="/tmp/x.img.gz"),
+    )
+    node, _ = recipe_to_node_config(r)
+    assert node.ssh_host_key_priv == priv_bytes
+    assert node.ssh_host_key_pub == pub_bytes
+
+
+def test_recipe_to_node_config_ssh_host_key_missing_priv_errors(tmp_path):
+    """Missing private key file → clear error before bake starts."""
+    r = Recipe(
+        hostname="t", board="pi-5", os="alpine",
+        ssh_pubkey=_PUBKEY,
+        ssh_host_key=str(tmp_path / "does_not_exist"),
+        output=OutputSpec(path="/tmp/x.img.gz"),
+    )
+    with pytest.raises(ValueError, match="private key not found"):
+        recipe_to_node_config(r)
+
+
+def test_recipe_to_node_config_ssh_host_key_missing_pub_errors(tmp_path):
+    """Private key exists but `.pub` sibling doesn't — distinct error."""
+    host_priv = tmp_path / "host_ed25519"
+    host_priv.write_bytes(b"fake")
+    r = Recipe(
+        hostname="t", board="pi-5", os="alpine",
+        ssh_pubkey=_PUBKEY,
+        ssh_host_key=str(host_priv),
+        output=OutputSpec(path="/tmp/x.img.gz"),
+    )
+    with pytest.raises(ValueError, match="public key not found"):
+        recipe_to_node_config(r)
+
+
+# --------------------------------------------------------------------------- #
+# apk_fetch — bake-time package fetch for air-gap appliances (v0.2)            #
+# --------------------------------------------------------------------------- #
+
+def test_apk_fetch_defaults_false(tmp_path):
+    """Omitted apk_fetch defaults to False (v0.0.9 behavior preserved)."""
+    r = _write_and_load(tmp_path, _minimal_yaml())
+    assert r.apk_fetch is False
+
+
+def test_apk_fetch_yaml_true_loads(tmp_path):
+    body = _minimal_yaml() + "apk_fetch: true\npackages:\n  - avahi\n"
+    r = _write_and_load(tmp_path, body)
+    assert r.apk_fetch is True
+    assert r.packages == ["avahi"]
+
+
+def test_apk_fetch_round_trips(tmp_path):
+    r1 = Recipe(
+        hostname="t", board="pi-5", os="alpine",
+        ssh_pubkey=_PUBKEY,
+        packages=["avahi"], apk_fetch=True,
+        output=OutputSpec(path="/tmp/x.img.gz"),
+    )
+    p = tmp_path / "round.yaml"
+    p.write_text(dump_recipe(r1))
+    r2 = load_recipe(p)
+    assert r2 == r1
+    assert r2.apk_fetch is True
+
+
+def test_apk_fetch_non_bool_rejected(tmp_path):
+    body = _minimal_yaml() + 'apk_fetch: "yes"\n'
+    with pytest.raises(ValueError, match="apk_fetch"):
+        _write_and_load(tmp_path, body)
+
+
+def test_apk_fetch_passes_to_build_kwargs():
+    r = Recipe(
+        hostname="t", board="pi-5", os="alpine",
+        ssh_pubkey=_PUBKEY, apk_fetch=True,
+        output=OutputSpec(path="/tmp/x.img.gz"),
+    )
+    _, kwargs = recipe_to_node_config(r)
+    assert kwargs["apk_fetch"] is True
