@@ -1,0 +1,23 @@
+# Original Pi Zero W (ARMv6 / armhf) — joins WiFi via DHCP.
+#
+# The Pi Zero W (1.1) is the ONLY board still needing 32-bit ARMv6
+# Alpine. Pi Zero 2 W and everything newer is aarch64. Pi-bake
+# resolves the right URL automatically from `board: pi-zero-w`.
+
+hostname: td-pi0w-1
+board: pi-zero-w
+os: alpine
+
+ssh_pubkey: ~/.ssh/totaldns-adhoc.pub
+
+network:
+  mode: dhcp
+  send_hostname: true
+
+wifi:
+  ssid: totaldns-lab
+  psk: change-me
+  country: US
+
+output:
+  path: ~/sdcards/td-pi0w-1.img.gz

@@ -76,6 +76,46 @@ pi-bake build \
   --out ~/sdcards/boat.img.gz
 ```
 
+## YAML recipes (v0.0.5+)
+
+Operators bake the same image from a YAML recipe. Better for
+multi-node deployments + version control:
+
+```
+pi-bake build --config ~/recipes/pi-5.yaml
+```
+
+Already have a working CLI invocation? Round-trip it to YAML:
+
+```
+pi-bake build \
+  --board pi-5 --os alpine --hostname boat \
+  --ssh-pubkey ~/.ssh/id_ed25519.pub \
+  --out ~/sdcards/boat.img.gz \
+  --to-yaml ~/recipes/boat.yaml \
+  --no-bake
+```
+
+`--no-bake` skips the actual image build — useful when you only
+want to capture the recipe. Drop it to bake AND save the YAML.
+
+References:
+- [`pi-bake.example.yaml`](pi-bake.example.yaml) — annotated reference
+  for every field, dnsmasq-style. Read once, never go hunting for
+  options again.
+- [`examples/`](examples/) — minimal, tested recipes for common
+  shapes (wifi-station, wired AP, BE200 host on Alpine edge).
+
+Validate a recipe without baking:
+
+```
+pi-bake build --config recipe.yaml --to-yaml /tmp/normalized.yaml --no-bake
+```
+
+This runs the strict validator (unknown keys are an error) and
+writes a canonical normalized YAML — surfaces schema errors
+instantly while you're editing.
+
 ## Supported boards × OSes
 
 | Board          | Alpine | Raspbian | Debian |

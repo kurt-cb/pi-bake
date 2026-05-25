@@ -43,10 +43,24 @@ DEFAULT_IMAGE_SIZE_MB = 400
 def bake(
     *, url: str, node: NodeConfig, out_path: Path,
     image_size_mb: int = DEFAULT_IMAGE_SIZE_MB,
+    alpine_branch: str = "v3.21",
+    extra_packages: list[str] | None = None,
 ) -> Path:
     """Build an Alpine RPi `.img.gz` for `node`. Returns out_path.
 
     Steps the operator might want to inspect: each one logs at INFO.
+
+    `alpine_branch`: Alpine repo branch to write into
+        `/etc/apk/repositories` — `v3.21` (default), `edge`, etc.
+        Affects post-boot `apk` operations only; the bundled /apks
+        cache still comes from the tarball.
+
+    `extra_packages`: additional apk package names appended to
+        `/etc/apk/world`. On first boot, init's `apk add` installs
+        them. Currently network-required when not in the stock
+        /apks cache (avahi, dbus, linux-firmware-intel etc. are
+        NOT in the stock cache) — bake-time cache enrichment is a
+        v0.3 ROADMAP item.
     """
     _require_tools("mformat", "mcopy", "mmd")
 
@@ -84,7 +98,11 @@ def bake(
         # 4. Per-node apkovl.tar.gz.
         apkovl_path = td / f"{node.hostname}.apkovl.tar.gz"
         LOG.info("generating apkovl: %s", apkovl_path.name)
-        _write_apkovl(apkovl_path, node)
+        _write_apkovl(
+            apkovl_path, node,
+            alpine_branch=alpine_branch,
+            extra_packages=extra_packages or [],
+        )
         _mcopy_into(img, apkovl_path, "/")
 
         # 5. gzip → out_path.
@@ -136,7 +154,13 @@ def _mcopy_into(img: Path, src: Path, dest: str = "/") -> None:
 # apkovl generation                                                            #
 # --------------------------------------------------------------------------- #
 
-def _write_apkovl(out: Path, node: NodeConfig) -> None:
+def _write_apkovl(
+    out: Path,
+    node: NodeConfig,
+    *,
+    alpine_branch: str = "v3.21",
+    extra_packages: list[str] | None = None,
+) -> None:
     """Build an Alpine apkovl.tar.gz for `node`.
 
     Strategy: rely on Alpine RPi's diskless init, which on first boot
@@ -275,14 +299,17 @@ def _write_apkovl(out: Path, node: NodeConfig) -> None:
 
     # /etc/apk/repositories — local FAT cache first (init's `--no-network`
     # path resolves from here), then upstream so post-boot `apk add`
-    # works for anything not in the cache. Track the matching version
-    # to avoid mixed-release ABI surprises.
+    # works for anything not in the cache. `alpine_branch` controls
+    # the upstream branch: `v3.21` (stable) or `edge` (rolling — used
+    # when the operator needs drivers/firmware only present on edge,
+    # e.g. Intel BE200 iwlwifi). Edge is rolling so reproducibility
+    # is weaker; the trade is unavoidable for edge-only hardware.
     members.append((
         "etc/apk/repositories",
         (
-            "/media/mmcblk0/apks\n"
-            "http://dl-cdn.alpinelinux.org/alpine/v3.21/main\n"
-            "http://dl-cdn.alpinelinux.org/alpine/v3.21/community\n"
+            f"/media/mmcblk0/apks\n"
+            f"http://dl-cdn.alpinelinux.org/alpine/{alpine_branch}/main\n"
+            f"http://dl-cdn.alpinelinux.org/alpine/{alpine_branch}/community\n"
         ).encode(),
         0o644, False,
     ))
@@ -320,6 +347,18 @@ def _write_apkovl(out: Path, node: NodeConfig) -> None:
             "iw",
             "ifupdown-ng-wifi",
         ]
+    # Operator-declared extras (YAML `packages:` list). De-dup against
+    # the baseline so explicit `avahi` in YAML doesn't double-list with
+    # something we add unconditionally. Sort the extras for stable
+    # output (helps `diff` between bakes). Today, anything NOT in the
+    # stock RPi /apks cache (avahi, dbus, linux-firmware-intel, etc.)
+    # requires the Pi to have working network on first boot — init
+    # falls back to the upstream Alpine repo. Bake-time cache
+    # enrichment (the air-gap story) is a v0.3 ROADMAP item.
+    baseline = set(world_pkgs)
+    for pkg in sorted(set(extra_packages or [])):
+        if pkg not in baseline:
+            world_pkgs.append(pkg)
     members.append((
         "etc/apk/world",
         ("\n".join(world_pkgs) + "\n").encode(),
@@ -369,6 +408,33 @@ def _write_apkovl(out: Path, node: NodeConfig) -> None:
             b'wpa_supplicant_args="-iwlan0"\n',
             0o644, False,
         ))
+        # Power-save off on wlan0. The Pi Zero W's BCM43438 chipset
+        # aggressively power-saves by default: L2 stays associated but
+        # ARP/L3 traffic gets dropped, so the device looks "up" while
+        # being unreachable from peers. Fix is `iw dev wlan0 set
+        # power_save off`. Harmless no-op on cards that handle PS
+        # properly, so we apply unconditionally when wifi is on.
+        # Runs at boot via OpenRC `local`; rc_add picked up via the
+        # runlevel default symlink (already added below for `local`
+        # service when other /etc/local.d/ scripts are present).
+        members.append((
+            "etc/local.d/wlan-power-save-off.start",
+            (
+                "#!/bin/sh\n"
+                "# Written by pi-bake — disable WiFi power save (BCM43438 fix).\n"
+                "# Harmless on cards that handle PS properly.\n"
+                "# Wait briefly for wpa_supplicant to bring the iface up,\n"
+                "# then turn PS off.\n"
+                "for i in 1 2 3 4 5; do\n"
+                "    if ip link show wlan0 >/dev/null 2>&1; then\n"
+                "        iw dev wlan0 set power_save off 2>/dev/null && break\n"
+                "    fi\n"
+                "    sleep 1\n"
+                "done\n"
+                "exit 0\n"
+            ).encode(),
+            0o755, False,
+        ))
 
     # /etc/runlevels/default/* — symlinks into /etc/init.d/ enable
     # services at boot. The target init scripts don't exist yet when
@@ -381,6 +447,9 @@ def _write_apkovl(out: Path, node: NodeConfig) -> None:
         runlevel_svcs.append("dhcpcd")
     if node.has_wifi:
         runlevel_svcs.append("wpa_supplicant")
+        # `local` runs scripts in /etc/local.d/*.start at boot —
+        # we use it for the wlan power-save-off fix above.
+        runlevel_svcs.append("local")
     for svc in runlevel_svcs:
         members.append((
             f"etc/runlevels/default/{svc}",

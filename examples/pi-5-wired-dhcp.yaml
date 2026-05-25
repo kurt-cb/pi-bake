@@ -1,0 +1,31 @@
+# Pi 5 (aarch64) — wired eth0 via DHCP. Stock stable Alpine.
+#
+# Used as the §25 hardware lab's totaldns-server platform. eth0 = WAN
+# (DHCP from upstream router); LAN-AP later via wlan0 (built-in
+# brcmfmac) or wlan1 (Intel BE200 — see pi-5-be200-edge.yaml for
+# the edge-OS variant that unlocks iwlwifi).
+#
+# Packages: avahi gives the operator `https://td-pi5-1.local:8443/`
+# IP-agnostic reachability — pretty much essential for an appliance
+# whose IP can change each cold boot. Currently requires network on
+# first boot (not in stock /apks cache); bake-time cache enrichment
+# is a v0.3 ROADMAP item.
+
+hostname: td-pi5-1
+board: pi-5
+os: alpine
+
+ssh_pubkey: ~/.ssh/totaldns-adhoc.pub
+
+network:
+  mode: dhcp
+  send_hostname: true
+
+packages:
+  - avahi
+  - avahi-tools
+  - dbus
+  - py3-pydbus
+
+output:
+  path: ~/sdcards/td-pi5-1.img.gz

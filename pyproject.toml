@@ -33,11 +33,14 @@ classifiers = [
     "Topic :: System :: Boot",
     "Topic :: System :: Installation/Setup",
 ]
-# Pure stdlib at the Python level. Runtime depends on `mtools` +
-# `dosfstools` on PATH (Alpine baker) and `losetup` (raspbian
-# baker, when implemented in v0.2). Operator installs those via
-# their distro package manager.
-dependencies = []
+# Python deps minimal. PyYAML added in v0.0.5 for YAML recipe
+# support (`pi-bake build --config <yaml>` + `--to-yaml`). System
+# tools at runtime: `mtools` + `dosfstools` on PATH (Alpine baker)
+# and `losetup` (raspbian baker, when implemented in v0.2).
+# Operator installs those via their distro package manager.
+dependencies = [
+    "PyYAML>=5.4",
+]
 
 [project.urls]
 Homepage = "https://github.com/kurt-cb/pi-bake"

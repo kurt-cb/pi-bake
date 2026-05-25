@@ -31,11 +31,15 @@ def build(
     *, board: str, os_name: str, version: str | None,
     node: NodeConfig, out_path: str | Path,
     image_size_mb: int | None = None,
+    extra_packages: list[str] | None = None,
 ) -> Path:
     """Build an `.img.gz` for `(board, os, version, node)`.
 
     `version=None` → use the OS's latest known-good.
     `image_size_mb=None` → backend's default.
+    `extra_packages` → list of apk package names appended to
+        `/etc/apk/world` (Alpine only). Today these install on
+        first boot via network when not in the stock /apks cache.
 
     Raises:
       - KeyError on unknown board/os.
@@ -60,7 +64,18 @@ def build(
     backend = o.bake_backend
     if backend == "alpine":
         from pi_bake import alpine
-        kwargs = {"url": url, "node": node, "out_path": Path(out_path)}
+        # Alpine repositories branch: `edge` keeps the rolling label,
+        # everything else gets the `v3.21`-style prefix.
+        if resolved_version == "edge":
+            alpine_branch = "edge"
+        else:
+            minor = ".".join(resolved_version.split(".")[:2])
+            alpine_branch = f"v{minor}"
+        kwargs = {
+            "url": url, "node": node, "out_path": Path(out_path),
+            "alpine_branch": alpine_branch,
+            "extra_packages": extra_packages,
+        }
         if image_size_mb is not None:
             kwargs["image_size_mb"] = image_size_mb
         return alpine.bake(**kwargs)

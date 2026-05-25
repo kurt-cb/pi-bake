@@ -30,6 +30,10 @@ from pi_bake.boards import Board, BOARDS, list_boards
 from pi_bake.config import NodeConfig
 from pi_bake.oses import OSImage, OSES, list_oses, resolve_image
 from pi_bake.bake import build, supports
+from pi_bake.recipe import (
+    NetworkSpec, OutputSpec, Recipe, WifiSpec,
+    dump_recipe, load_recipe, recipe_to_node_config,
+)
 
 try:
     # Distribution name on PyPI is `py-pi-bake`; importlib.metadata
@@ -46,4 +50,6 @@ __all__ = [
     "OSImage", "OSES", "list_oses", "resolve_image",
     "NodeConfig",
     "build", "supports",
+    "Recipe", "NetworkSpec", "WifiSpec", "OutputSpec",
+    "dump_recipe", "load_recipe", "recipe_to_node_config",
 ]

@@ -3,19 +3,30 @@
 Subcommands:
   list-boards         — every supported Pi model
   list-os [--board B] — every OS we can bake (optionally filtered)
-  build               — bake an .img.gz for one Pi
+  build               — bake an .img.gz for one Pi (CLI flags or --config YAML)
 
 Examples:
   pi-bake list-boards
   pi-bake list-os --board pi-zero-2-w
+
+  # Flag-driven bake (familiar form).
   pi-bake build \\
     --board pi-zero-2-w --os alpine --version 3.21.4 \\
     --hostname pi-radio-1 --ssh-pubkey ~/.ssh/id_ed25519.pub \\
     --wifi-ssid totaldns-lab --wifi-psk secret \\
     --out ~/sdcards/pi-radio-1.img.gz
 
+  # Save those flags as a reusable YAML recipe (no bake).
+  pi-bake build <same-flags> --to-yaml ~/recipes/pi-radio-1.yaml --no-bake
+
+  # Bake from the YAML recipe later (or anywhere).
+  pi-bake build --config ~/recipes/pi-radio-1.yaml
+
 The output `.img.gz` is flashable with:
   zcat ~/sdcards/pi-radio-1.img.gz | sudo dd of=/dev/mmcblk0 bs=4M status=progress
+
+Annotated reference for every YAML field: pi-bake.example.yaml.
+Tested-known-good recipes: examples/.
 """
 from __future__ import annotations
 
@@ -29,6 +40,10 @@ from pi_bake.bake import build, supports
 from pi_bake.boards import BOARDS, list_boards
 from pi_bake.config import NodeConfig
 from pi_bake.oses import list_oses
+from pi_bake.recipe import (
+    NetworkSpec, OutputSpec, Recipe, WifiSpec,
+    dump_recipe, load_recipe, recipe_to_node_config,
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -97,50 +112,114 @@ def _cmd_list_os(args: argparse.Namespace) -> int:
 
 
 def _cmd_build(args: argparse.Namespace) -> int:
-    if not supports(args.board, args.os_name):
+    # YAML-driven path: --config <yaml> reads everything from a
+    # recipe file and ignores per-field flags. Operator can still
+    # override --out / --no-bake / --to-yaml.
+    if args.config:
+        try:
+            recipe = load_recipe(args.config)
+        except (FileNotFoundError, ValueError) as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 1
+        # Allow --out override for one-off retargeting without
+        # editing the YAML.
+        if args.out:
+            recipe.output.path = args.out
+        node, build_kwargs = recipe_to_node_config(recipe)
+    else:
+        # Flag-driven path: every input from argv. Required args
+        # checked first so we fail before any I/O.
+        if not args.board or not args.os_name or not args.hostname:
+            print(
+                "error: --board, --os, --hostname are required "
+                "(or use --config <yaml>)",
+                file=sys.stderr,
+            )
+            return 2
+        pubkey = ""
+        if args.ssh_pubkey:
+            pubkey = Path(args.ssh_pubkey).expanduser().read_text().strip()
+        elif args.ssh_pubkey_inline:
+            pubkey = args.ssh_pubkey_inline.strip()
+        else:
+            print("error: --ssh-pubkey or --ssh-pubkey-inline is required",
+                  file=sys.stderr)
+            return 2
+
+        extra_pubkeys: list[str] = []
+        for path in args.extra_pubkey or []:
+            extra_pubkeys.append(Path(path).expanduser().read_text().strip())
+
+        if not args.out and not args.to_yaml:
+            print(
+                "error: --out is required unless --to-yaml is given "
+                "(--to-yaml writes a recipe without baking)",
+                file=sys.stderr,
+            )
+            return 2
+
+        # Build a Recipe so --to-yaml can serialize it AND the
+        # downstream NodeConfig is constructed via the same path
+        # the YAML loader uses (no duplicate field plumbing).
+        recipe = Recipe(
+            hostname=args.hostname,
+            board=args.board,
+            os=args.os_name,
+            os_version=args.version or "",
+            timezone=args.timezone,
+            ssh_pubkey=args.ssh_pubkey or pubkey,
+            extra_pubkeys=list(args.extra_pubkey or []),
+            network=NetworkSpec(
+                mode="static" if args.static_v4 else "dhcp",
+                address=args.static_v4 or "",
+                gateway=args.gateway_v4 or "",
+                send_hostname=args.dhcp_send_hostname,
+            ),
+            wifi=(
+                WifiSpec(
+                    ssid=args.wifi_ssid, psk=args.wifi_psk,
+                    country=args.wifi_country,
+                )
+                if args.wifi_ssid else None
+            ),
+            packages=list(args.package or []),
+            output=OutputSpec(
+                # --to-yaml without --out: emit a sensible placeholder
+                # so the dumped YAML is editable + visibly incomplete
+                # (operator changes the dir; rerun bakes).
+                path=args.out or f"~/sdcards/{args.hostname}.img.gz",
+                image_size_mb=args.image_size_mb or 0,
+            ),
+        )
+        # Build the node from the recipe so the pubkey-resolution
+        # logic + validation lives in exactly one place.
+        node, build_kwargs = recipe_to_node_config(recipe)
+
+    # --to-yaml writes the recipe to disk regardless of which input
+    # path got us here. Useful for round-tripping flag form to YAML.
+    if args.to_yaml:
+        text = dump_recipe(recipe)
+        p = Path(args.to_yaml).expanduser().resolve()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text)
+        print(f"wrote recipe → {p}")
+
+    # --no-bake skips the actual bake (just serialize + exit).
+    if args.no_bake:
+        return 0
+
+    if not supports(build_kwargs["board"], build_kwargs["os_name"]):
         print(
-            f"error: {args.os_name!r} doesn't run on {args.board!r}. "
-            f"Run `pi-bake list-os --board {args.board}` to see options.",
+            f"error: {build_kwargs['os_name']!r} doesn't run on "
+            f"{build_kwargs['board']!r}. "
+            f"Run `pi-bake list-os --board {build_kwargs['board']}` to "
+            f"see options.",
             file=sys.stderr,
         )
         return 2
 
-    pubkey = ""
-    if args.ssh_pubkey:
-        pubkey = Path(args.ssh_pubkey).expanduser().read_text().strip()
-    elif args.ssh_pubkey_inline:
-        pubkey = args.ssh_pubkey_inline.strip()
-    else:
-        print("error: --ssh-pubkey or --ssh-pubkey-inline is required",
-              file=sys.stderr)
-        return 2
-
-    extra_pubkeys: list[str] = []
-    for path in args.extra_pubkey or []:
-        extra_pubkeys.append(Path(path).expanduser().read_text().strip())
-
-    node = NodeConfig(
-        hostname=args.hostname,
-        ssh_pubkey=pubkey,
-        wifi_ssid=args.wifi_ssid or "",
-        wifi_psk=args.wifi_psk or "",
-        wifi_country=args.wifi_country,
-        timezone=args.timezone,
-        extra_pubkeys=extra_pubkeys,
-        static_ipv4=args.static_v4 or "",
-        gateway_ipv4=args.gateway_v4 or "",
-        dhcp_send_hostname=args.dhcp_send_hostname,
-    )
-
     try:
-        out = build(
-            board=args.board,
-            os_name=args.os_name,
-            version=args.version,
-            node=node,
-            out_path=args.out,
-            image_size_mb=args.image_size_mb,
-        )
+        out = build(node=node, **build_kwargs)
     except NotImplementedError as e:
         print(f"error: {e}", file=sys.stderr)
         return 3
@@ -185,14 +264,27 @@ def _build_parser() -> argparse.ArgumentParser:
     p_los.set_defaults(func=_cmd_list_os)
 
     # build
-    p_b = sub.add_parser("build", help="bake an .img.gz for one Pi")
-    p_b.add_argument("--board", required=True,
+    p_b = sub.add_parser(
+        "build",
+        help="bake an .img.gz for one Pi (CLI flags or --config YAML)",
+    )
+    # Recipe-based path: --config wins over per-field flags. Not
+    # marked required because --config is an alternative input.
+    p_b.add_argument(
+        "--config", metavar="YAML",
+        help="read recipe from YAML file (see pi-bake.example.yaml). "
+             "When set, per-field flags are ignored except --out.",
+    )
+    # Per-field flags: required iff --config is absent. We don't use
+    # argparse's required=True here because --config makes them moot.
+    p_b.add_argument("--board",
                      help=f"one of: {', '.join(b.name for b in BOARDS)}")
-    p_b.add_argument("--os", dest="os_name", required=True,
+    p_b.add_argument("--os", dest="os_name",
                      help="alpine | raspbian | debian")
     p_b.add_argument("--version",
-                     help="OS version (default: latest known-good)")
-    p_b.add_argument("--hostname", required=True,
+                     help="OS version (default: latest known-good; "
+                          "Alpine: `edge` for newer drivers, e.g. iwlwifi)")
+    p_b.add_argument("--hostname",
                      help="DNS-label-safe hostname")
     p_b.add_argument("--ssh-pubkey", metavar="PATH",
                      help="OpenSSH pubkey file to install into "
@@ -215,6 +307,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p_b.add_argument("--timezone", default="UTC",
                      help="default: UTC")
     p_b.add_argument(
+        "--package", action="append",
+        help="extra apk package to install on first boot (repeatable). "
+             "Not in stock RPi /apks cache → needs network on first boot "
+             "(bake-time cache enrichment is a v0.3 ROADMAP item).",
+    )
+    p_b.add_argument(
         "--no-dhcp-hostname",
         dest="dhcp_send_hostname",
         action="store_false",
@@ -226,8 +324,19 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_b.add_argument("--image-size-mb", type=int,
                      help="FAT32 image size in MB (default: backend's default)")
-    p_b.add_argument("--out", required=True,
-                     help="output .img.gz path")
+    p_b.add_argument("--out",
+                     help="output .img.gz path (required unless --to-yaml)")
+    p_b.add_argument(
+        "--to-yaml", metavar="PATH",
+        help="serialize the (CLI flags OR --config) recipe to PATH as "
+             "an annotated YAML file. Combine with --no-bake to ONLY "
+             "write the recipe.",
+    )
+    p_b.add_argument(
+        "--no-bake", action="store_true",
+        help="don't actually bake — useful with --to-yaml to capture "
+             "a recipe without producing an image.",
+    )
     p_b.set_defaults(func=_cmd_build)
 
     return p

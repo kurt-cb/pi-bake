@@ -1,0 +1,20 @@
+# Pi Zero 2 W (aarch64) — joins an existing WiFi SSID via DHCP.
+# Smallest useful recipe: replace the SSH pubkey path + WiFi creds.
+
+hostname: td-pi0-1
+board: pi-zero-2-w
+os: alpine
+
+ssh_pubkey: ~/.ssh/totaldns-adhoc.pub
+
+network:
+  mode: dhcp
+  send_hostname: true
+
+wifi:
+  ssid: totaldns-lab
+  psk: change-me
+  country: US
+
+output:
+  path: ~/sdcards/td-pi0-1.img.gz

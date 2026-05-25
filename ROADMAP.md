@@ -1,6 +1,114 @@
 # pi-bake roadmap
 
-## v0.2 — top of list
+## ✅ Landed since v0.0.4
+
+### YAML recipes are the primary interface (v0.0.5)
+
+`pi-bake build --config <yaml>` reads a strict-validated YAML
+recipe and bakes the image. `--to-yaml <path>` round-trips a
+CLI invocation (or a `--config` load) into a normalized
+annotated YAML file the operator can version-control. `--no-bake`
+skips the actual bake — useful with `--to-yaml` to capture or
+validate a recipe without producing an image.
+
+Shape (full annotated reference: `pi-bake.example.yaml`):
+
+```yaml
+hostname: td-pi5-1
+board: pi-5
+os: alpine
+os_version: edge                   # optional; defaults to latest known-good
+ssh_pubkey: ~/.ssh/totaldns-adhoc.pub
+network:
+  mode: dhcp                        # or "static" with address+gateway
+  send_hostname: true
+wifi:                               # optional — omit for wired-only
+  ssid: totaldns-lab
+  psk: secret
+packages:                           # extras appended to /etc/apk/world
+  - avahi
+  - linux-firmware-intel
+output:
+  path: ~/sdcards/td-pi5-1.img.gz
+```
+
+Strict load: unknown top-level keys + unknown sub-keys raise
+with the operator-facing field name (so a typo like
+`network: {addres: ...}` fails loudly with `unknown key
+['addres']`, not a silent bake).
+
+Tested recipes shipped under `examples/`:
+- `pi-zero-2-w-wifi-station.yaml`
+- `pi-5-wired-dhcp.yaml`
+- `pi-5-be200-edge.yaml` (Alpine edge for iwlwifi)
+- `pi-zero-w-armhf.yaml`
+
+### Alpine `edge` OS version (v0.0.5)
+
+`os_version: edge` (or `--version edge`) uses the latest stable
+Alpine RPi tarball for the bootloader/FAT layout but points
+`/etc/apk/repositories` at `edge`. Post-boot `apk upgrade`
+rolls kernel + drivers + firmware forward to edge versions.
+
+Motivation: stable 3.21's `linux-rpi-6.12.13` modloop strips the
+entire `wireless/intel/` subtree (no `iwlwifi.ko`) despite
+`bcm2711_defconfig` having `CONFIG_IWLWIFI=m`. Edge's
+`linux-rpi-6.12.85` ships it, plus `linux-firmware-intel`
+carries the BE200 firmware blobs (`iwlwifi-gl-c0-fm-c0-*` +
+`iwlwifi-sc-a0-fm-c0-*`). See `§30 fw-be200` in totaldns'
+FEATURES-TODO for the full decision tree.
+
+Trade-off: edge is rolling. Reproducibility weaker. For an
+appliance NEEDING an edge-only kernel feature, unavoidable;
+pin the snapshot date at bake time when possible.
+
+
+## v0.3 — top of list (next focused work)
+
+### Bake-time apk-fetch (air-gap appliance support)
+
+**Why it matters:** v0.0.5 honors `packages:` by appending them
+to `/etc/apk/world`. On first boot, init's `apk add` installs
+them — from the upstream Alpine repo, requiring the Pi to have
+working network. For an **air-gapped appliance** ("the device
+will never be on the internet"), the package + its recursive
+deps must be in the bake-time `/media/mmcblk0/apks/` cache so
+init's `apk add --no-network` path finds them locally.
+
+**Plan:**
+
+1. Auto-download `apk-tools-static` (small static binary) into
+   `~/.cache/pi-bake/apk.static/` on first bake-with-packages.
+   Works on any Linux host without requiring `apk-tools` system
+   install. Reused on subsequent bakes.
+
+2. `_extra_apks_fetch()` in `alpine.py`:
+   - `apk.static --arch <target> --root <stage> fetch --recursive
+     -X <repo-url> <pkg...>`
+   - Writes `.apk` files into `<stage>/var/cache/apk/`
+   - Move into FAT image's `/apks/<arch>/`
+
+3. Regenerate (or augment) the local APKINDEX so init's
+   `apk add` can resolve packages from the cache. Sign with a
+   bake-time-generated key whose pubkey gets baked into
+   `/etc/apk/keys/` in the apkovl.
+
+4. Honor `os_version: edge` here too: fetch from edge repos
+   when the recipe asks for edge, so the cache covers the
+   edge kernel/firmware bundle.
+
+**Why deferred to v0.3:** the YAML schema + CLI lands cleanly
+without it. Bake-time fetch is a meaty implementation
+(APKINDEX format + signing + cross-arch). Better to ship the
+declarative interface now, then add the air-gap implementation
+as a focused PR that doesn't reshape the YAML schema.
+
+### Honor `runlevels:` + `fat_files:` from YAML
+
+Schema docs already imply both; implementation deferred until
+operators actually ask for them. Today operators get the same
+effect via the post-boot pyinfra deploy chain (which is more
+flexible). Skip until there's a real use case.
 
 ### Pre-baked SSH host keys (no host-key-change warnings)
 Every reflash regenerates `/etc/ssh/ssh_host_*_key{,.pub}` so the
@@ -42,20 +150,24 @@ The 936f233 baseline (sshd + dhcpcd + chrony) is sufficient for
 pyinfra take-over. Avahi is a discoverability nice-to-have, not a
 blocker.
 
-### Interactive mode + YAML recipes (UX)
-The `pi-bake build` CLI is now flag-heavy enough that nobody will
-remember it. Add an interactive walk-through:
+### Interactive mode (UX layer over YAML)
+Now that YAML recipes are the primary input, a `--interactive`
+walk-through would be the operator-friendly third entry point
+(alongside flags + `--config`). Wizard collects answers, writes
+a YAML via the same `dump_recipe()`, optionally bakes:
 
 ```
 pi-bake build --interactive
   ? Which board? (pi-5, pi-zero-2-w, …)        > pi-5
-  ? Which OS?    (alpine 3.21.4, raspbian, …)  > alpine 3.21.4
+  ? Which OS? (alpine, raspbian, …)            > alpine
+  ? OS version (latest | edge | 3.21.4)        > edge
   ? Hostname?                                   > td-pi5-1
   ? SSH pubkey path? (Tab to browse)           > ~/.ssh/totaldns-adhoc.pub
   ? WiFi? [y/N]                                 > N
   ? Static IP? [y/N]                            > y
     ? CIDR?                                     > 192.168.4.111/24
     ? Gateway?                                  > 192.168.4.1
+  ? Extra packages? (comma-sep)                 > avahi, dbus, linux-firmware-intel
   ? HATs / expansion? (multi-select)
       [x] Intel BE200 M.2 WiFi 7 (PCIe HAT)
       [ ] PoE+ HAT (Pi 5)
@@ -65,15 +177,8 @@ pi-bake build --interactive
   ? Bake now? [Y/n]
 ```
 
-The HAT picker drives config.txt edits (dtoverlay=, dtparam=).
-
-### YAML recipe in/out
-- `pi-bake build --from-yaml pi-1.yaml` — bake from a saved recipe.
-- `pi-bake build --to-yaml pi-1.yaml ...` — write the recipe without baking.
-- `pi-bake build --interactive --to-yaml ...` — walk-through saves.
-
-Means batch deployments are: edit pi-1.yaml, pi-2.yaml, pi-3.yaml,
-then `for y in *.yaml; do pi-bake build --from-yaml $y; done`.
+The HAT picker drives `config.txt` edits (dtoverlay=, dtparam=)
+once HAT catalog work below lands.
 
 ### HAT catalog + config.txt overlays (FAT writes)
 Currently we only write apkovl. To support HATs (PCIe BE200, Sense

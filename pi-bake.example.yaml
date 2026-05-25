@@ -1,0 +1,145 @@
+# pi-bake.example.yaml — annotated reference for `pi-bake build --config`
+#
+# Every field is documented inline. Operators copy this file as a
+# starting point: trim what isn't needed, fill in what is. The
+# `examples/` directory has minimal, tested recipes for common
+# shapes (wifi-station, wired AP, BE200 host) — start there if
+# this looks long.
+#
+# Run:    pi-bake build --config <this-file>
+# Or:     pi-bake build --config <this-file> --to-yaml normalized.yaml --no-bake
+#         (round-trips through the validator — surfaces schema errors,
+#          writes a clean canonical copy)
+#
+# --------------------------------------------------------------------------
+# REQUIRED FIELDS
+# --------------------------------------------------------------------------
+
+# DNS-label-safe hostname. Becomes /etc/hostname AND the name the
+# device announces via DHCP option 12 (when network.send_hostname).
+# Lowercase, digits, hyphens; <=63 chars; no leading/trailing hyphen.
+hostname: td-pi5-1
+
+# Target board. `pi-bake list-boards` shows the full set.
+# Common: pi-5, pi-4, pi-zero-2-w, pi-zero-w, pi-3.
+board: pi-5
+
+# OS family. `pi-bake list-os --board <b>` filters by board.
+# Today: alpine (fully working), raspbian / debian (v0.2 stubs).
+os: alpine
+
+# Where the OpenSSH pubkey comes from. Three forms accepted:
+#   - path on the bake host (starts with `~`, `/`, or `./`)
+#   - inline ssh-rsa / ssh-ed25519 / ecdsa-sha2-* string
+#   - bare filename — read as file if it exists, else error
+# Becomes /root/.ssh/authorized_keys (Alpine) with PasswordAuthentication
+# disabled in sshd_config. Password login OFF by default — only key
+# auth works.
+ssh_pubkey: ~/.ssh/totaldns-adhoc.pub
+
+# Where the .img.gz lands. Operator dd's this to the SD card.
+output:
+  path: ~/sdcards/td-pi5-1.img.gz
+  # Optional. 0 / omitted → backend default (400 MB for Alpine).
+  # Bump if you bake huge package sets that don't fit.
+  # image_size_mb: 800
+
+# --------------------------------------------------------------------------
+# OPTIONAL FIELDS — sensible defaults shown commented out
+# --------------------------------------------------------------------------
+
+# OS version. Empty / omitted → latest known-good in the catalog.
+#   - alpine: "3.21.4", "3.21.3", "3.20.5", "edge"
+#     `edge` is special: uses the latest stable RPi tarball for
+#     bootloader/FAT layout but points /etc/apk/repositories at
+#     edge so post-boot `apk upgrade` rolls the kernel + drivers
+#     forward to edge versions. Use this when stable Alpine lacks
+#     a driver you need (e.g. Intel BE200 iwlwifi, present in
+#     edge's linux-rpi-6.12.85, absent from stable 3.21's 6.12.13).
+#   - raspbian: "bookworm"
+#   - debian: "12.7-arm64"
+# os_version: edge
+
+# IANA timezone. Default UTC. Some clocks (Pi has no RTC) come up
+# at 1970-01-01 anyway until chrony syncs — this is only the
+# permanent setting for /etc/timezone.
+# timezone: America/New_York
+
+# Additional authorized_keys entries beyond ssh_pubkey above. Same
+# three-form resolution (path / inline / bare filename).
+# extra_pubkeys:
+#   - ~/.ssh/operator-laptop.pub
+#   - "ssh-ed25519 AAAA... pyinfra@runner"
+
+# --------------------------------------------------------------------------
+# NETWORK (eth0)
+# --------------------------------------------------------------------------
+# eth0 config. WiFi is a separate `wifi:` block below.
+
+network:
+  # `dhcp` (default): dhcpcd manages eth0. Most flexible.
+  # `static`: requires `address` (CIDR) + `gateway` below; dhcpcd
+  # is dropped from the runlevel entirely and ifupdown brings eth0
+  # up at boot. Use when the upstream LAN doesn't have a DHCP server
+  # OR when the appliance needs a stable address known in advance.
+  mode: dhcp
+
+  # Static-mode only. CIDR form: `192.168.4.111/24`.
+  # address: 192.168.4.111/24
+  # gateway: 192.168.4.1
+
+  # dhcp-mode only. When true (default), dhcpcd sends the system
+  # hostname in DHCP option 12 on DISCOVER/REQUEST — upstream DHCP
+  # server logs + lease tables show "td-pi5-1" not "?". Set false
+  # to bake an intentional test fixture for DHCP-server-side
+  # hostname recovery via mDNS or synthesized placeholder.
+  send_hostname: true
+
+# --------------------------------------------------------------------------
+# WIFI — bootstrap creds for first-boot auto-join (optional)
+# --------------------------------------------------------------------------
+# Omit the whole `wifi:` block for wired-only nodes. Generates
+# /etc/wpa_supplicant/wpa_supplicant.conf + enables the runlevel.
+#
+# This is *bootstrap-only*: the goal is to get the Pi reachable
+# so the post-boot orchestrator (pyinfra etc.) can configure
+# whatever WiFi mode the device actually needs (station, AP,
+# multi-BSS, etc.).
+
+# wifi:
+#   ssid: totaldns-lab
+#   psk: change-me
+#   country: US     # regulatory domain — controls available channels
+
+# --------------------------------------------------------------------------
+# PACKAGES — extras beyond the stock RPi tarball cache
+# --------------------------------------------------------------------------
+# apk packages appended to /etc/apk/world. On first boot, Alpine
+# init's `apk add` installs them.
+#
+# IMPORTANT (today): packages NOT in the stock RPi tarball /apks
+# cache require the Pi to have working network on first boot —
+# init falls back to the upstream Alpine repos (controlled by
+# `os_version` above; edge = rolling, anything else = stable).
+#
+# Bake-time apk-fetch (enriching the local /apks cache so the
+# device boots fully provisioned offline) is a v0.3 ROADMAP item.
+# See pi-bake's ROADMAP.md for status.
+#
+# Stock packages (free to list — already in the cache):
+#   alpine-base, openssh-server, openssh-server-common-openrc,
+#   openssh-sftp-server, openssh-client-default, dhcpcd,
+#   dhcpcd-openrc, chrony, chrony-openrc, wpa_supplicant,
+#   wpa_supplicant-openrc, iw, ifupdown-ng-wifi.
+#
+# Common extras that DO need network on first boot today:
+#   avahi, avahi-tools, dbus, py3-pydbus  → mDNS bridge
+#   linux-firmware-brcm                    → Pi onboard WiFi
+#   linux-firmware-intel                   → Intel BE200 (needs os_version: edge)
+
+# packages:
+#   - avahi
+#   - avahi-tools
+#   - dbus
+#   - py3-pydbus
+#   - linux-firmware-brcm
