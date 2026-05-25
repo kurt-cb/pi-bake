@@ -1,0 +1,79 @@
+# pibakehub fragment — schema v1
+# Scraped 2026-05-25 from https://www.waveshare.com/wiki/RS485_CAN_HAT
+# NOT verified on hardware.
+
+schema_version: 1
+vendor: waveshare
+slug: rs485-can-hat
+display_name: "Waveshare RS485 CAN HAT (MCP2515)"
+manufacturer_url: https://www.waveshare.com/wiki/RS485_CAN_HAT
+description: |
+  RS485 + CAN bus expansion HAT. Uses an MCP2515 SPI CAN
+  controller (with TJA1051 transceiver) and an SP3485 RS485
+  transceiver wired to the Pi's hardware UART. Supports CAN
+  bitrates up to 1 Mbps.
+tags:
+  - can
+  - rs485
+  - spi
+  - uart
+  - serial
+
+requires:
+  oneof_boards:
+    - pi-3
+    - pi-4
+    - pi-5
+
+# MCP2515 over SPI; the crystal on this HAT revision is 12 MHz,
+# IRQ on GPIO25. RS485 uses the hardware UART (so disable
+# Bluetooth on the SoC's UART0 to free /dev/serial0).
+config_txt:
+  - dtparam=spi=on
+  - dtoverlay=mcp2515-can0,oscillator=12000000,interrupt=25,spimaxfrequency=2000000
+  - enable_uart=1
+  - dtoverlay=disable-bt              # frees /dev/serial0 for RS485
+
+# Modules autoloaded by the overlay, listed for explicitness.
+modules:
+  - mcp251x
+  - can_dev
+
+# Alpine equivalents of the Debian can-utils + python3-can are
+# in `community/`. python3-can is a pip package; install via
+# `pip install python-can` post-boot if needed (Alpine has it
+# under py3-python-can in newer repos).
+packages:
+  - can-utils
+
+caveats: |
+  - The vendor wiki documents two crystal variants (12 MHz vs
+    8 MHz). This fragment assumes 12 MHz (the current shipping
+    HAT). If the older 8 MHz revision is in use, change the
+    `oscillator=` value to 8000000.
+  - `dtoverlay=disable-bt` removes onboard Bluetooth — there's
+    no way to share UART0 between BT and RS485. Fragment
+    `waveshare/poe-hat-f` and others may be incompatible if
+    they depend on BT.
+  - On Pi 5, the UART situation is different (more UARTs
+    available). The disable-bt + enable_uart pattern still works
+    but may not be necessary; check `dmesg | grep tty` after
+    boot.
+  - Post-boot to bring CAN interface up:
+      sudo ip link set can0 up type can bitrate 1000000
+      sudo ifconfig can0 txqueuelen 65536
+    pi-bake doesn't currently bake this into /etc/network/
+    interfaces; v0.4+ may add CAN-iface fragment support.
+
+see_also:
+  - https://www.waveshare.com/wiki/2-CH_CAN_FD_HAT
+  - https://github.com/raspberrypi/firmware/tree/master/boot/overlays
+
+provenance:
+  scraped_from: https://www.waveshare.com/wiki/RS485_CAN_HAT
+  scraped_date: 2026-05-25
+  scraper_version: pibakehub-pilot-0.1
+  notes: |
+    Extracted from the "Open SPI" + "Open UART" sections of the
+    wiki. The wiki shows two oscillator values; this fragment
+    pins the modern 12 MHz one.

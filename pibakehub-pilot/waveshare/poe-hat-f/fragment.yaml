@@ -1,0 +1,56 @@
+# pibakehub fragment — schema v1
+# Scraped 2026-05-25 from https://www.waveshare.com/wiki/PoE_HAT_(F)
+# NOT verified on hardware.
+
+schema_version: 1
+vendor: waveshare
+slug: poe-hat-f
+display_name: "Waveshare PoE HAT (F)"
+manufacturer_url: https://www.waveshare.com/wiki/PoE_HAT_(F)
+description: |
+  802.3af PoE+ HAT for Raspberry Pi 4 / Pi 5. Provides power
+  over Ethernet — no separate DC barrel-jack supply needed.
+  Includes a temperature-controlled cooling fan driven by the
+  Pi's onboard PWM fan header (Pi 5) or via a small EEPROM
+  config on Pi 4.
+tags:
+  - poe
+  - cooling
+  - pi-5
+  - pi-4
+
+requires:
+  oneof_boards:
+    - pi-4
+    - pi-5
+
+# No /boot/firmware/config.txt edits required. The HAT is purely
+# powered hardware — Linux sees the integrated NIC + temperature
+# sensor through standard kernel paths.
+#
+# Pi 5 fan control: configured via `sudo rpi-eeprom-config --edit`
+# (BOOT_FAN_TEMP / BOOT_FAN_PWM). This is a bootloader-level edit
+# the pi-bake apkovl can't make directly; the operator runs it
+# once after first boot. v0.4+ may add an EEPROM-edit fragment
+# field; for now, this fragment documents the manual step.
+
+caveats: |
+  - Requires PoE+ (802.3at) for Pi 5 PCIe usage at full speed.
+  - Fan control on Pi 5 needs a one-time
+    `sudo rpi-eeprom-config --edit` post-boot to set BOOT_FAN_*
+    thresholds. pi-bake does not bake EEPROM edits (schema v1).
+  - Pi 4: fan-control wiring depends on the HAT revision; check
+    the manufacturer wiki.
+
+see_also:
+  - https://www.waveshare.com/wiki/PoE_HAT_(G)
+  - https://www.waveshare.com/wiki/PoE_HAT_(H)
+
+provenance:
+  scraped_from: https://www.waveshare.com/wiki/PoE_HAT_(F)
+  scraped_date: 2026-05-25
+  scraper_version: pibakehub-pilot-0.1
+  notes: |
+    Extracted from the Waveshare wiki page. The page largely
+    documents hardware specs + EEPROM fan tuning; no kernel /
+    config.txt edits are required for basic PoE function.

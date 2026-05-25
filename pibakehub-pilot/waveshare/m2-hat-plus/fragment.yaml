@@ -1,0 +1,58 @@
+# pibakehub fragment — schema v1
+# Scraped 2026-05-25 from https://www.waveshare.com/wiki/Raspberry_Pi_M.2_HAT+
+# NOT verified on hardware.
+
+schema_version: 1
+vendor: waveshare
+slug: m2-hat-plus
+display_name: "Raspberry Pi M.2 HAT+ (NVMe)"
+manufacturer_url: https://www.waveshare.com/wiki/Raspberry_Pi_M.2_HAT+
+description: |
+  Official Raspberry Pi PCIe-to-M.2 HAT designed for the Pi 5.
+  Adapts the Pi 5's PCIe FFC connector to an M.2 M-Key slot for
+  NVMe SSDs. Compatible with 2230/2242/2260/2280 M.2 drives.
+tags:
+  - pcie
+  - m2
+  - nvme
+  - pi-5
+  - storage
+
+requires:
+  oneof_boards:
+    - pi-5
+
+# Latest Raspberry Pi OS auto-detects the HAT and enables PCIe;
+# Alpine on Pi 5 needs the dtparam explicitly. Gen3 is faster but
+# may be unstable on some NVMe controllers — start at Gen2
+# (default; line omitted) and uncomment Gen3 if benchmarks
+# warrant.
+config_txt:
+  - dtparam=pciex1
+  # - dtparam=pciex1_gen=3        # OPTIONAL — uncomment for Gen3
+
+caveats: |
+  - Pi 5's PCIe slot is electrically Gen2 by default. Gen3
+    (`dtparam=pciex1_gen=3`) is unofficial: some NVMe controllers
+    + cabling combinations are unstable at Gen3. Test before
+    relying on it.
+  - To boot from the NVMe (instead of SD), update the bootloader:
+      sudo rpi-eeprom-config --edit
+      BOOT_ORDER=0xf416        # NVMe before SD
+    pi-bake doesn't write EEPROM (schema v1) — one-time post-boot
+    operator step.
+  - Cooling: PCIe + NVMe is hot. A heatsink on the SSD and active
+    cooling on the Pi are strongly recommended for sustained
+    throughput.
+
+see_also:
+  - https://www.raspberrypi.com/products/m2-hat-plus/
+  - https://github.com/raspberrypi/documentation/blob/develop/documentation/asciidoc/computers/raspberry-pi/booting.adoc
+
+provenance:
+  scraped_from: https://www.waveshare.com/wiki/Raspberry_Pi_M.2_HAT+
+  scraped_date: 2026-05-25
+  scraper_version: pibakehub-pilot-0.1
+  notes: |
+    Extracted dtparam= lines + EEPROM BOOT_ORDER instructions
+    from the "Quick Start" section of the wiki page.

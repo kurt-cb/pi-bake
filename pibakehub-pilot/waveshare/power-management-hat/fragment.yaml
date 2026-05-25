@@ -1,0 +1,67 @@
+# pibakehub fragment — schema v1
+# Scraped 2026-05-25 from https://www.waveshare.com/wiki/Power_Management_HAT
+# NOT verified on hardware.
+
+schema_version: 1
+vendor: waveshare
+slug: power-management-hat
+display_name: "Waveshare Power Management HAT"
+manufacturer_url: https://www.waveshare.com/wiki/Power_Management_HAT
+description: |
+  Smart power-bank HAT with an embedded Arduino MCU + RTC.
+  Provides battery-backed UPS-style power, scheduled wake from
+  RTC, and graceful auto-shutdown. RTC chip is PCF8523 over I2C.
+tags:
+  - power
+  - ups
+  - rtc
+  - battery
+  - i2c
+
+requires:
+  oneof_boards:
+    - pi-3
+    - pi-4
+
+# I2C for the RTC + MCU side-channel. RTC overlay binds the
+# kernel's rtc-pcf8523 driver to the right I2C address.
+config_txt:
+  - dtparam=i2c_arm=on
+  - dtoverlay=i2c-rtc,pcf8523
+
+modules:
+  - rtc_pcf8523
+  - i2c_dev
+
+# The vendor ships a setup shell script
+# (Power-Management-HAT-Setup.sh) that disables Pi's fake_hwclock
+# and enables hwclock sync. Equivalent on Alpine: use chrony +
+# hwclock (already wired in pi-bake's apkovl).
+packages:
+  - i2c-tools
+
+caveats: |
+  - Without the dtoverlay, /dev/rtc0 won't exist on first boot
+    and the embedded RTC is unused. The Pi's fake_hwclock kicks
+    in instead — clock survives reboot but jumps on power loss.
+  - The vendor's setup.sh disables fake_hwclock and aliases
+    `hwclock -w` into shutdown. Alpine's `chrony` already
+    handles sync; for the wake-from-RTC + UPS auto-shutdown
+    features, a hand-written systemd / OpenRC unit is needed
+    (out of scope for this fragment).
+  - Battery: check the Li-ion's charge polarity before first
+    insertion. The HAT's overcharge / overdischarge protection
+    relies on correct wiring.
+
+see_also:
+  - https://files.waveshare.com/upload/9/91/Power_Management_HAT_User_Manual_EN.pdf
+
+provenance:
+  scraped_from: https://www.waveshare.com/wiki/Power_Management_HAT
+  scraped_date: 2026-05-25
+  scraper_version: pibakehub-pilot-0.1
+  notes: |
+    Extracted from the "Software setup" section. The vendor's
+    setup script does a lot beyond pi-bake's apkovl scope
+    (Arduino firmware flash, etc.) — fragment only encodes the
+    in-kernel RTC config.

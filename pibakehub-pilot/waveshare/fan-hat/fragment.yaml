@@ -1,0 +1,59 @@
+# pibakehub fragment — schema v1
+# Scraped 2026-05-25 from https://www.waveshare.com/wiki/Fan_HAT
+# NOT verified on hardware.
+
+schema_version: 1
+vendor: waveshare
+slug: fan-hat
+display_name: "Waveshare Fan HAT (PCA9685 PWM, OLED)"
+manufacturer_url: https://www.waveshare.com/wiki/Fan_HAT
+description: |
+  PWM-controlled 30 mm fan HAT with a PCA9685 driver chip and
+  a small 0.91" OLED display. Useful for active cooling on
+  Pi 3 / Pi 4 (Pi 5 has onboard PWM fan support already, so
+  this HAT is redundant there).
+tags:
+  - cooling
+  - fan
+  - pwm
+  - i2c
+  - oled
+
+requires:
+  oneof_boards:
+    - pi-3
+    - pi-4
+
+# I2C is the only Pi-side bus needed: PCA9685 + OLED both speak
+# i2c-1.
+config_txt:
+  - dtparam=i2c_arm=on
+
+# python3-smbus + python3-pillow handle PCA9685 + OLED in the
+# vendor's example code. Alpine names:
+packages:
+  - py3-smbus
+  - py3-pillow
+
+caveats: |
+  - Pi 5 has native onboard PWM fan support; this HAT is
+    redundant. `requires.oneof_boards` excludes Pi 5
+    intentionally.
+  - The vendor's example code is the canonical control loop.
+    pi-bake doesn't bundle it — operator deploys it post-boot.
+  - I2C address conflicts: PCA9685 defaults to 0x40; the OLED
+    defaults to 0x3c. Both can coexist; check `i2cdetect -y 1`
+    after boot.
+
+see_also:
+  - https://github.com/adafruit/Adafruit-PCA9685-PWM-Servo-Driver-Library
+
+provenance:
+  scraped_from: https://www.waveshare.com/wiki/Fan_HAT
+  scraped_date: 2026-05-25
+  scraper_version: pibakehub-pilot-0.1
+  notes: |
+    Extracted from the Quick Start section. The wiki documents
+    several script-based control loops (wiringPi, bcm2835,
+    python smbus) — fragment surfaces only the apkovl-relevant
+    facts (I2C bus + Python libs).

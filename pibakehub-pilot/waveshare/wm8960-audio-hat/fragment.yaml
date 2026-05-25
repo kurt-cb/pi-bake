@@ -1,0 +1,74 @@
+# pibakehub fragment — schema v1
+# Scraped 2026-05-25 from https://www.waveshare.com/wiki/WM8960_Audio_HAT
+# NOT verified on hardware.
+
+schema_version: 1
+vendor: waveshare
+slug: wm8960-audio-hat
+display_name: "Waveshare WM8960 Audio HAT"
+manufacturer_url: https://www.waveshare.com/wiki/WM8960_Audio_HAT
+description: |
+  I2S audio codec HAT based on the Cirrus/Wolfson WM8960. Stereo
+  line-out, headphone amp, two on-board MEMS mics. Designed for
+  Pi 4 and Pi 5 (any Pi with the standard 40-pin header).
+tags:
+  - audio
+  - i2s
+  - codec
+  - pi-4
+  - pi-5
+
+requires:
+  oneof_boards:
+    - pi-3
+    - pi-4
+    - pi-5
+
+# WM8960 needs I2S enabled in the device tree. The vendor's
+# installer (wm8960-soundcard DKMS package) compiles a kernel
+# module per running kernel — that workflow doesn't apply to
+# Alpine, where DKMS isn't the install path. The dtoverlay below
+# uses the kernel's in-tree wm8960 ALSA SoC driver, which IS
+# present in linux-rpi 6.6+ as `snd-soc-wm8960`.
+config_txt:
+  - dtparam=i2s=on
+  - dtparam=audio=on
+  - dtoverlay=wm8960-soundcard
+
+# Kernel module(s) the kernel autoloads via the overlay above.
+# Listed explicitly so /etc/modules forces them if udev misses.
+modules:
+  - snd_soc_wm8960
+  - snd_soc_wm8960_soundcard
+
+# Alpine has alsa-utils + asound config templates. For mics +
+# the vendor's mixer profile, the operator may want to drop in a
+# /etc/asound.conf — out of scope for v1 fragment schema.
+packages:
+  - alsa-utils
+
+caveats: |
+  - The vendor's setup uses a DKMS-built wm8960-soundcard module
+    on Raspberry Pi OS. This fragment uses the in-tree
+    snd-soc-wm8960 driver instead, which ships with Alpine's
+    linux-rpi kernel package. Audio works; some vendor-specific
+    mixer presets may differ.
+  - Bluetooth conflicts: enabling audio=on can mute Bluetooth.
+    If using BT + audio, add `dtoverlay=disable-bt` and accept
+    the loss of onboard BT.
+  - Confirm before relying on this fragment: scraped from vendor
+    docs that target Raspberry Pi OS + DKMS path, not in-tree.
+
+see_also:
+  - https://github.com/waveshare/WM8960-Audio-HAT
+  - https://www.kernel.org/doc/Documentation/sound/soc/
+
+provenance:
+  scraped_from: https://www.waveshare.com/wiki/WM8960_Audio_HAT
+  scraped_date: 2026-05-25
+  scraper_version: pibakehub-pilot-0.1
+  notes: |
+    The Waveshare wiki page assumes DKMS-driven driver install
+    on Raspberry Pi OS. The dtoverlay + module list here is the
+    Alpine-equivalent in-tree-driver path; needs hardware
+    verification before promotion to verified_on.

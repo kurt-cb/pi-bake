@@ -1,0 +1,73 @@
+# pibakehub fragment — schema v1
+# Scraped 2026-05-25 from https://www.waveshare.com/wiki/Raspberry_Pi_AI_HAT+
+# NOT verified on hardware.
+
+schema_version: 1
+vendor: waveshare
+slug: ai-hat-plus
+display_name: "Raspberry Pi AI HAT+ (Hailo-8/8L)"
+manufacturer_url: https://www.waveshare.com/wiki/Raspberry_Pi_AI_HAT+
+description: |
+  Hailo Hailo-8 or Hailo-8L NPU on a Pi 5 PCIe HAT. Delivers
+  13 / 26 TOPS for on-device inference. Vendor's stack
+  (`hailo-all` apt package) is Debian/Raspbian-targeted; running
+  on Alpine requires building the Hailo HailoRT driver from
+  source.
+tags:
+  - ai
+  - npu
+  - pcie
+  - hailo
+  - pi-5
+
+requires:
+  oneof_boards:
+    - pi-5
+
+# Enable PCIe + bump to Gen3 (Hailo-8 datasheet calls for Gen3 ×1
+# for full bandwidth).
+config_txt:
+  - dtparam=pciex1
+  - dtparam=pciex1_gen=3
+
+# Hailo's driver is upstream as `hailo_pci`. Whether the running
+# kernel ships it depends on the kernel build — linux-rpi 6.6+
+# does, edge generally does.
+modules:
+  - hailo_pci
+
+# `hailo-all` is a Debian metapackage bundling the driver,
+# HailoRT runtime, and Python bindings. Alpine has none of these
+# pre-packaged today. Empty packages: list — operator builds
+# HailoRT from source post-boot, OR sticks to Raspberry Pi OS
+# (which isn't yet a pi-bake backend; raspbian/debian are stubs).
+packages: []
+
+caveats: |
+  - **Not Alpine-ready out of the box.** The Hailo userspace
+    runtime (HailoRT) is shipped as .deb packages targeting
+    Raspberry Pi OS Bookworm. Running on Alpine requires
+    building HailoRT from source (Hailo provides source under
+    a permissive license).
+  - Until pi-bake ships a Raspberry Pi OS backend (v0.3+
+    ROADMAP), this fragment is informational only — bakes will
+    succeed but the NPU won't have userspace tooling. The
+    fragment exists to encode the PCIe enablement, which is
+    valid + useful even without the runtime.
+  - Cooling: Hailo-8 pulls real wattage under load. Pi 5 PoE+
+    or wall power, plus active cooling on both the Pi and the
+    NPU.
+
+see_also:
+  - https://www.raspberrypi.com/products/ai-hat/
+  - https://github.com/hailo-ai/HailoRT
+
+provenance:
+  scraped_from: https://www.waveshare.com/wiki/Raspberry_Pi_AI_HAT+
+  scraped_date: 2026-05-25
+  scraper_version: pibakehub-pilot-0.1
+  notes: |
+    The vendor wiki targets Raspberry Pi OS + apt. dtparam= lines
+    translate; the userspace stack does not. Marking as scraped
+    is the honest signal; a future Alpine-verified record needs
+    a working HailoRT build path.
