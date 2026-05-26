@@ -7,7 +7,7 @@ versions get assigned at tag time, not here.
 | #  | State | Item |
 |---:|:-----:|:-----|
 |  1 |  ✅   | [YAML recipes (`--config <yaml>` + `--to-yaml`)](#1-yaml-recipes) |
-|  2 |  ✅   | [Alpine `edge` OS version](#2-alpine-edge-os-version) |
+|  2 |  ✅   | [Alpine `edge` OS version](#2-alpine-edge-os-version) (v0.2.1: bake-time kernel upgrade via apk-in-chroot + qemu) |
 |  3 |  ✅   | [Pre-baked SSH host keys](#3-pre-baked-ssh-host-keys) |
 |  4 |  ✅   | [Bake-time apk-fetch (offline first boot — init-time install)](#4-bake-time-apk-fetch-offline-first-boot) |
 |  5 |  ✅   | [pibakehub v1 frozen design + 8-fragment pilot](#5-pibakehub-v1-frozen-design--pilot) |

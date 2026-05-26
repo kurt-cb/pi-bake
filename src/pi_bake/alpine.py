@@ -106,6 +106,26 @@ def bake(
             except TypeError:
                 tf.extractall(extracted)
 
+        # 2.4. Bake-time edge kernel upgrade when alpine_branch=edge.
+        # Replaces the stable kernel + modules + initramfs in the
+        # extracted tarball with the current edge versions via
+        # apk-in-chroot using qemu-user-static. Skipped (with a
+        # clear warning) when bake host lacks root / qemu /
+        # binfmt_misc — image stays bootable but ships the stable
+        # kernel. See alpine_edge.py for the architecture.
+        if alpine_branch == "edge":
+            from pi_bake import alpine_edge
+            try:
+                alpine_edge.upgrade_to_edge_kernel(extracted, target_arch=arch)
+            except alpine_edge.EdgeKernelSkipped as e:
+                LOG.warning("edge kernel upgrade SKIPPED: %s", e)
+                LOG.warning(
+                    "  image will boot the STABLE kernel "
+                    "(6.12.13-0-rpi on Alpine 3.21). Hardware "
+                    "needing edge-only drivers (e.g. Intel BE200 "
+                    "iwlwifi) won't work."
+                )
+
         # 2.5. Bake-time apk-fetch + signed-index regen, whenever
         # the operator declares extras. Drops fetched .apks into
         # /apks/<arch>/ alongside the stock cache (flat layout),

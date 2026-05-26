@@ -95,27 +95,3 @@ it stays out of pi-bake.
 for it (so the abstraction is informed by more than one
 workflow).
 
-### HAT catalog + config.txt overlays
-
-**From:** general — needed for any Pi with PCIe HAT, sense
-HAT, displays, etc.
-
-**Already in ROADMAP** under "v0.2 — HAT catalog + config.txt
-overlays". Currently pi-bake only writes the apkovl, not
-`/uboot/usercfg.txt` or `/config.txt`. HAT-bound boards
-(BE200 on PCIe, Adafruit PiTFT, Sense HAT) need
-`dtoverlay=` / `dtparam=` edits to enable the bus / device
-tree node.
-
-**Schema sketch:**
-```yaml
-hat:
-  - waveshare-poe-m2-e
-  - sense-hat
-```
-Each `hat:` entry resolves to a catalog entry knowing the
-required `dtoverlay=` / `dtparam=` lines, which get appended
-to `/uboot/usercfg.txt` on FAT.
-
-**Depends on:** [pibakehub](#pibakehub--community-recipe-registry)
-for the catalog source.

@@ -51,11 +51,25 @@ output:
 # OS version. Empty / omitted → latest known-good in the catalog.
 #   - alpine: "3.21.4", "3.21.3", "3.20.5", "edge"
 #     `edge` is special: uses the latest stable RPi tarball for
-#     bootloader/FAT layout but points /etc/apk/repositories at
-#     edge so post-boot `apk upgrade` rolls the kernel + drivers
-#     forward to edge versions. Use this when stable Alpine lacks
-#     a driver you need (e.g. Intel BE200 iwlwifi, present in
-#     edge's linux-rpi-6.12.85, absent from stable 3.21's 6.12.13).
+#     bootloader/FAT layout, points /etc/apk/repositories at
+#     edge, AND (v0.2.1+) tries to upgrade the kernel itself
+#     to edge at bake time via apk-in-chroot with qemu-aarch64-
+#     static. The seal-image ships with edge kernel/firmware
+#     pre-installed (no post-boot `apk upgrade` required —
+#     that path was broken on Alpine RPi diskless, see
+#     feature_request.md item #1 history).
+#
+#     Bake-host needs `qemu-user-static` + `binfmt_misc`
+#     registration + sudo for edge kernel upgrade. If those
+#     aren't present, the upgrade is SKIPPED with a clear
+#     warning and the image ships with the stable kernel
+#     (driver gap not closed; hardware needing edge-only
+#     drivers like Intel BE200 iwlwifi won't work).
+#
+#     Install on Fedora:
+#       sudo dnf install qemu-user-static qemu-user-binfmt
+#     Install on Debian/Ubuntu:
+#       sudo apt install qemu-user-static binfmt-support
 #   - raspbian: "bookworm"
 #   - debian: "12.7-arm64"
 # os_version: edge

@@ -63,7 +63,12 @@ just bolt it on.
   from stable 3.21's linux-rpi-6.12.13 modloop; present in
   edge's 6.12.85). Bakes use latest stable RPi tarball for
   bootloader/FAT layout + write `edge` repos into
-  /etc/apk/repositories.
+  /etc/apk/repositories. **v0.2.1+: bake-time edge kernel
+  upgrade via apk-in-chroot + qemu-user-static** (see
+  alpine_edge.py) so the sealed image actually ships with the
+  edge kernel/modules/initramfs pre-installed; skipped with a
+  clear warning if bake host lacks root / qemu-user-static /
+  binfmt_misc.
 - **Pi Zero W BCM43438 power-save fix** — auto-baked
   `/etc/local.d/wlan-power-save-off.start` when wifi is on.
 - **Bake-time apk-fetch + init-time install (v0.2 + #3)** —
