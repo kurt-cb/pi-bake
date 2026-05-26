@@ -222,12 +222,21 @@ def upgrade_to_edge_kernel(
     mr_tarball = fetch(mr_url)
 
     # Step 2. Extract minirootfs into a SEPARATE tmpdir.
+    # filter="tar" (not "data"): Python 3.12+'s strict `data`
+    # filter rejects absolute symlinks (AbsoluteLinkError), which
+    # blows up on alpine-minirootfs because busybox is wired up
+    # via absolute symlinks (/usr/bin/yes → /bin/busybox etc.).
+    # We trust the tarball (sha256-verified against Alpine's
+    # signed .sha256 sidecar by download.fetch()), so the looser
+    # `tar` filter is correct: still blocks path traversal +
+    # absolute paths, allows symlinks. Pre-3.12 Python lacks the
+    # filter kwarg, so wrap.
     chroot = workdir / "edge-chroot"
     chroot.mkdir(parents=True, exist_ok=True)
     LOG.info("edge kernel upgrade: extracting minirootfs → %s", chroot)
     with tarfile.open(mr_tarball, "r:*") as tf:
         try:
-            tf.extractall(chroot, filter="data")
+            tf.extractall(chroot, filter="tar")
         except TypeError:
             tf.extractall(chroot)
 
