@@ -46,10 +46,61 @@ def test_raspbian_does_not_support_pi_zero_w():
     assert not supports("pi-zero-w", "raspbian")
 
 
-def test_debian_supports_pi_4_and_5_only():
+def test_debian_supports_pi_3_and_4_only():
+    """raspi.debian.net has tested builds for Pi 1/2/3/4 on
+    bookworm but no Pi 5 tested image (2026-05). pi-bake's
+    catalog reflects that gap."""
+    assert supports("pi-3", "debian")
     assert supports("pi-4", "debian")
-    assert supports("pi-5", "debian")
+    assert not supports("pi-5", "debian")
     assert not supports("pi-zero-2-w", "debian")
+
+
+def test_fedora_supports_pi_4_and_5_only():
+    """Fedora's generic aarch64 image targets Pi 4 + Pi 5 (need
+    arm-image-installer for the Pi-bootloader shim; pi-bake's
+    Fedora backend produces the configured rootfs but caveat
+    applies — see fedora.py module docstring)."""
+    assert supports("pi-4", "fedora")
+    assert supports("pi-5", "fedora")
+    assert not supports("pi-3", "fedora")
+    assert not supports("pi-zero-2-w", "fedora")
+
+
+def test_fedora_in_os_catalog():
+    """Fedora must be discoverable via the catalog API."""
+    os_ = get_os("fedora")
+    assert os_.bake_backend == "fedora"
+    assert os_.image_kind == "img_xz"
+    assert "Server-Host-Generic" in os_.url_template
+    # Latest hardcoded version is current Fedora (Fedora 43 at the
+    # time of writing). Bump in oses.py when newer Fedora ships;
+    # this just ensures we have SOMETHING in versions.
+    assert os_.latest()
+
+
+def test_resolve_image_debian_uses_board_slug():
+    """Debian URL encodes the Pi model number; resolve_image
+    must consume the board_slug arg to fill it in."""
+    _, _, url_pi4 = resolve_image(
+        "debian", None, "aarch64", board_slug="pi-4",
+    )
+    _, _, url_pi3 = resolve_image(
+        "debian", None, "aarch64", board_slug="pi-3",
+    )
+    assert "raspi_4" in url_pi4
+    assert "raspi_3" in url_pi3
+    assert "raspi_5" not in url_pi4
+
+
+def test_resolve_image_fedora_uses_major_for_minor_version():
+    """Fedora URLs interpolate the major release (`43`) into the
+    path even though `version` carries the full point-release
+    (`43-1.6`). minor_version derivation needs the Fedora-specific
+    split on `-`."""
+    _, _, url = resolve_image("fedora", "43-1.6", "aarch64")
+    assert "/releases/43/" in url
+    assert "Fedora-Server-Host-Generic-43-1.6.aarch64.raw.xz" in url
 
 
 def test_resolve_image_uses_latest_when_version_omitted():

@@ -62,7 +62,9 @@ def build(
             f"Supported boards for {o.name}: {sorted(o.supports_boards)}"
         )
 
-    o, resolved_version, url = resolve_image(o.name, version, b.arch)
+    o, resolved_version, url = resolve_image(
+        o.name, version, b.arch, board_slug=b.name,
+    )
 
     LOG.info(
         "baking %s on %s using %s %s (url=%s)",
@@ -91,6 +93,18 @@ def build(
     elif backend == "raspbian":
         from pi_bake import raspbian
         return raspbian.bake(
+            url=url, node=node, out_path=Path(out_path),
+            image_size_mb=image_size_mb or 0,
+        )
+    elif backend == "debian":
+        from pi_bake import debian
+        return debian.bake(
+            url=url, node=node, out_path=Path(out_path),
+            image_size_mb=image_size_mb or 0,
+        )
+    elif backend == "fedora":
+        from pi_bake import fedora
+        return fedora.bake(
             url=url, node=node, out_path=Path(out_path),
             image_size_mb=image_size_mb or 0,
         )

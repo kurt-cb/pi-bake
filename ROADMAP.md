@@ -14,16 +14,16 @@ versions get assigned at tag time, not here.
 |  6 |  ✅   | [HAT overlays + `/etc/modules` (FAT writes)](#6-hat-overlays--etcmodules-fat-writes) |
 |  7 |  🔴   | [`--pibakehub` wired into `pi-bake build`](#7---pibakehub-wired-into-pi-bake-build) |
 |  8 |  ✅   | [Init-time install of bake-staged extras (signed APKINDEX)](#8-init-time-install-of-bake-staged-extras-signed-apkindex) |
-|  9 |  ⬜   | [Raspbian backend (`.img.xz`, losetup)](#9-raspbian-backend) |
-| 10 |  ⬜   | [Fedora IoT / Fedora ARM backend](#10-fedora-backend) |
-| 11 |  ⬜   | [Debian (community Pi images) backend](#11-debian-backend) |
+|  9 |  ✅   | [Raspbian backend (`.img.xz`, losetup)](#9-raspbian-backend) |
+| 10 |  🟡   | [Fedora ARM backend (cloud-init NoCloud; Pi-bootloader-shim TBD)](#10-fedora-backend) |
+| 11 |  ✅   | [Debian (community Pi images) backend](#11-debian-backend) |
 | 12 |  ⬜   | [Honor `runlevels:` + `fat_files:` from YAML](#12-honor-runlevels--fat_files-from-yaml) |
 | 13 |  ⬜   | [Interactive mode (`--interactive` wizard)](#13-interactive-mode) |
 | 14 |  ⬜   | [Dynamic upstream version discovery](#14-dynamic-version-discovery) |
 | 15 |  ⏸   | [Generalized recovery layer (waits for 2nd downstream asker)](#15-generalized-recovery-layer) |
 | 16 |  ⬜   | [Operator-controlled FAT contents (extended backups, scratch)](#16-operator-controlled-fat-contents) |
 
-**State key:** ✅ shipped · 🚧 in flight · 🔴 blocked (on another item) · ⬜ not started · ⏸ deferred (won't pick up without more signal)
+**State key:** ✅ shipped · 🟡 partial (code in, hardware verification or extra step pending) · 🚧 in flight · 🔴 blocked (on another item) · ⬜ not started · ⏸ deferred (won't pick up without more signal)
 
 ---
 
@@ -277,53 +277,95 @@ upstream (~100 packages); pi-bake can put as many .apks in
 ---
 
 ## 9. Raspbian backend
-**⬜ not started · part of "all three OSes in one push"**
+**✅ shipped**
 
-`.img.xz` partitioned image (boot + root + ext4). Plan:
+Fetches `https://downloads.raspberrypi.com/raspios_lite_arm64_latest`
+(permanent redirect to the current dated build — likely trixie
+as of 2026), xz -d's it into a tempdir, losetup -fP's the raw
+.img, mounts both partitions, and edits:
 
-- Auto-download from `downloads.raspberrypi.com/raspios_lite_*`.
-- `xz -d` then `losetup -P` to expose partitions (sudo prompted
-  on the bake host).
-- Mount the boot partition, write `userconf.txt` (Pi user +
-  hashed password), `ssh` marker file, `wpa_supplicant.conf`,
-  `usercfg.txt` (consumes #6's `config_txt:` field).
-- Mount the root partition, edit `/etc/hostname`, write the
-  operator's `authorized_keys` into `/root/.ssh/` (and `/home/
-  pi/.ssh/`).
-- `losetup -d`, repack `xz`, output `.img.xz`.
+- **boot (vfat):** `/ssh` marker, `/userconf.txt`
+  (`pi:<sha-512-crypted-random-pass>`), `/wpa_supplicant.conf`
+  when wifi is set, `/usercfg.txt` + `config.txt` include line
+  when `config_txt:` is set.
+- **rootfs (ext4):** `/etc/hostname`, `/etc/hosts`,
+  `/home/pi/.ssh/authorized_keys` (chown 1000:1000),
+  `/root/.ssh/authorized_keys`, pre-baked `/etc/ssh/ssh_host_*`
+  when `ssh_host_key:` set, `/etc/dhcpcd.conf` static IP block,
+  `/etc/modules`.
 
-Matches the rpi-imager pre-fill flow but reproducible from a YAML
-recipe. Target: Pi 4 + Pi 5 with Raspberry Pi OS Lite (Bookworm
-+ Trixie when it lands).
+Then unmount + losetup -d + xz the modified .img → `.img.xz`.
 
-Builds on the SAME `NodeConfig` and YAML schema as the Alpine
-backend — operators switch `os: alpine` ↔ `os: raspbian` and
-re-bake.
+The `pi` user's password is a sha-512 crypt of a random
+throwaway secret — Bookworm+ requires SOME password set in
+userconf.txt before sshd will allow logins, but pi-bake's
+sshd config disables password auth so only the operator's
+pubkey matters.
+
+**Sudo required** for `losetup -fP` + `mount` + per-file writes
+inside the mounted partitions. Pi-bake shells out to `sudo`;
+operators typically run inside a privileged LXC container or
+with sudoers entries allowing `losetup` + `mount` + `umount` +
+`tee` + `chmod` + `chown` + `mkdir` + `sh -c "cat >>"` without
+password. README documents the requirement.
 
 ---
 
 ## 10. Fedora backend
-**⬜ not started · part of "all three OSes in one push"**
+**🟡 partial — code shipped, Pi-bootloader-shim still operator-side**
 
-Fedora IoT and Fedora-on-ARM ship Pi-compatible `.raw.xz` images
-at [`fedoraproject.org/iot`](https://fedoraproject.org/iot/).
-Same losetup-style mount + edit + repack pattern as #9, with
-rpm-ostree / systemd-firstboot for the user/SSH config instead
-of Raspberry Pi's `userconf.txt`.
+Fetches Fedora Server Host-Generic aarch64 (e.g.
+`Fedora-Server-Host-Generic-43-1.6.aarch64.raw.xz`), mounts the
+EFI + rootfs partitions, and writes cloud-init NoCloud data
+(`/user-data` + `/meta-data` on the EFI partition). The
+user-data is YAML cloud-config setting hostname, the default
+`fedora` user with sudo + operator SSH pubkey, optional wifi
+via NetworkManager keyfile, optional static IP.
 
-Target boards: Pi 4 + Pi 5 (Fedora ARM doesn't support older
-Pis with the same fidelity).
+**Caveat:** Fedora's aarch64 image is a generic ARM build — no
+Pi-specific bootloader. The image pi-bake produces is a valid
+configured Fedora rootfs but doesn't directly boot on a Pi. The
+operator must run `arm-image-installer --target=rpi4` (or rpi5)
+on the output to inject Pi firmware before flashing. See
+`fedora.py` module docstring for the workflow.
+
+Pi-bootloader-shim is a future enhancement — would fit under
+#16 (operator-controlled FAT contents: inject extra files into
+the boot partition at bake time, in this case the Pi firmware
+from `raspberrypi/firmware` GitHub).
+
+Same sudo + LXC story as #9.
 
 ---
 
 ## 11. Debian backend
-**⬜ not started · part of "all three OSes in one push"**
+**✅ shipped**
 
-Community Pi-on-Debian images at
-[`raspi.debian.net`](https://raspi.debian.net/) (already in the
-OS catalog as a stub). `.img.xz`, same partition layout pattern
-as #9. Less polished than Raspbian but useful for operators who
-don't want Raspberry-Pi-Foundation branding/configs.
+Community Pi-on-Debian images from
+[`raspi.debian.net`](https://raspi.debian.net/) — Pi-specific
+firmware is bundled, so the produced image boots directly on
+the Pi (unlike Fedora).
+
+Default catalog version: `20231109` (the most recent build
+covering Pi 1/2/3/4 on bookworm). raspi.debian.net's tested-
+build cadence is slow; bump the catalog version when a newer
+one lands. **No Pi 5 tested image yet** at raspi.debian.net
+(2026-05) — `supports_boards` in the catalog reflects that.
+
+Per-bake edits (same imgxz.py scaffolding as #9):
+
+- **boot (vfat):** `/usercfg.txt` + `config.txt` include line
+  when `config_txt:` is set.
+- **rootfs (ext4):** `/etc/hostname`, `/etc/hosts`,
+  `/root/.ssh/authorized_keys` (no `pi` user on Debian; root
+  is the default account), `/etc/ssh/sshd_config.d/00-pi-bake.conf`
+  (disables password auth + permits root pubkey login),
+  pre-baked `/etc/ssh/ssh_host_*` when `ssh_host_key:` set,
+  `/etc/wpa_supplicant/wpa_supplicant.conf` + interfaces.d
+  drop-in when wifi is set, `/etc/network/interfaces.d/eth0`
+  static block when `static_ipv4:` is set, `/etc/modules`.
+
+Same sudo + LXC requirement as #9.
 
 ---
 

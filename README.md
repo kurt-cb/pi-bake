@@ -33,15 +33,34 @@ System tools (one-time per dev machine):
 
 ```
 # Fedora
-sudo dnf install mtools dosfstools
+sudo dnf install mtools dosfstools xz util-linux openssl tar cpio
 # Debian / Ubuntu
-sudo apt install mtools dosfstools
+sudo apt install mtools dosfstools xz-utils util-linux openssl tar cpio
 # Alpine
-apk add mtools dosfstools
+apk add mtools dosfstools xz util-linux openssl tar cpio
 ```
 
-The Alpine baker uses **`mtools`** (no root). The Raspbian baker
-(v0.2) will additionally need `sudo` for `losetup`.
+Tooling by backend:
+
+| Backend | Tools | Root? |
+|---------|-------|-------|
+| **Alpine** | mtools + dosfstools + tar + cpio + openssl + ssh-keygen | NO |
+| **Raspbian / Debian / Fedora** | xz + losetup + mount + partprobe + lsblk + ssh-keygen | **YES** (losetup needs CAP_SYS_ADMIN) |
+
+For the sudo-requiring backends, the typical operator setup is
+either:
+
+- **Run pi-bake inside a privileged LXC container** that gives it
+  root without prompting your host. LXC setup is outside this
+  project's scope (use whatever container/VM workflow you prefer);
+  pi-bake just needs to be able to `losetup` + `mount`.
+- **Add passwordless sudoers entries** for the specific commands
+  pi-bake invokes (`losetup`, `mount`, `umount`, `partprobe`,
+  `tee`, `chmod`, `chown`, `mkdir`, `sh -c "cat >>"`). Restrictive
+  enough to be safe; broad enough to bake without prompting.
+
+The Alpine baker doesn't need any of this — runs as a regular
+user via mtools.
 
 ## Quick start
 
@@ -118,23 +137,29 @@ instantly while you're editing.
 
 ## Supported boards × OSes
 
-| Board          | Alpine | Raspbian | Debian |
-|----------------|--------|----------|--------|
-| Pi Zero W      | ✓ (armhf) | ✗ (32-bit ARMv6 not packaged) | ✗ |
-| Pi Zero 2 W    | ✓        | ✓ (32-bit ARMv7 / arm64) | ✗ |
-| Pi 3           | ✓        | ✓        | ✗ |
-| Pi 4           | ✓        | ✓        | ✓ |
-| Pi 5           | ✓ (3.21+) | ✓        | ✓ |
+| Board          | Alpine | Raspbian | Debian | Fedora |
+|----------------|--------|----------|--------|--------|
+| Pi Zero W      | ✓ (armhf) | ✗ (32-bit ARMv6 not packaged) | ✗ | ✗ |
+| Pi Zero 2 W    | ✓        | ✓ (32-bit ARMv7 / arm64) | ✗ | ✗ |
+| Pi 3           | ✓        | ✓        | ✓      | ✗ |
+| Pi 4           | ✓        | ✓        | ✓      | 🟡 |
+| Pi 5           | ✓ (3.21+) | ✓        | ✗ (raspi.debian.net has no Pi 5 build) | 🟡 |
+
+🟡 = Fedora bake produces a configured Fedora rootfs but the
+upstream Fedora ARM image isn't Pi-specific — operator must run
+`arm-image-installer --target=rpi4|rpi5` on the output to inject
+Pi firmware before flashing. Pi-bootloader-shim is a future
+pi-bake feature (see ROADMAP.md).
 
 Run `pi-bake list-os --board <b>` for the current matrix.
 
 ## Status
 
-**v0.1**: Alpine baker is fully working (no-root, mtools). Raspbian
-+ Debian backends are stubbed with a clear error pointing at the
-v0.2 roadmap. Most Pi 4 / Pi 5 deployments bootstrap with
-`rpi-imager`'s pre-fill flow today — `pi-bake` will take that
-over in v0.2.
+All four backends (Alpine, Raspbian, Debian, Fedora) are
+working as of v0.3. Alpine is the no-root, mtools-based path
+(easiest to run from any Linux host). Raspbian / Debian / Fedora
+use losetup + mount and require sudo (typically via LXC — see
+above).
 
 ## Python API
 
@@ -159,9 +184,10 @@ build(
 
 ## Roadmap
 
-- **v0.2 — Raspbian + Debian backends.** `losetup -P` + `firstrun.sh`
-  injection. Needs `sudo`; CLI prompts honestly.
-- **v0.2 — dynamic OS version discovery.** Pull
+See [ROADMAP.md](ROADMAP.md) for the numbered backlog + state
+table. Highlights:
+
+- **Dynamic OS version discovery.** Pull
   `https://dl-cdn.alpinelinux.org/alpine/` and the rpi downloads
   index instead of the hardcoded `versions` tuples in the catalog.
 - **v0.3 — multi-image batch.** `pi-bake build-many topology.json`

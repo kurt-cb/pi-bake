@@ -41,8 +41,19 @@ just bolt it on.
 ### What ships
 
 - **Alpine baker** — fully working, no-root, mtools-based.
-- **Raspbian / Debian backends** — stubbed with clear error
-  pointing at the v0.2 roadmap.
+- **Raspbian + Debian backends** — losetup-based, REQUIRES SUDO
+  (or run inside a privileged LXC container). Same NodeConfig +
+  YAML schema as Alpine; `os: raspbian` or `os: debian` swaps
+  the backend. Raspbian uses Pi OS Lite's permanent-latest
+  redirect; Debian uses raspi.debian.net's tested builds. Both
+  ship Pi-specific firmware in the boot partition — boots
+  directly.
+- **Fedora backend** — losetup-based, REQUIRES SUDO. Produces a
+  configured Fedora Server aarch64 image with cloud-init
+  NoCloud preset. **Does NOT directly boot on Pi** — operator
+  must run `arm-image-installer --target=rpi4|rpi5` on the
+  output to inject Pi firmware (Fedora ARM isn't Pi-specific
+  upstream). Pi-bootloader-shim is a future pi-bake item.
 - **YAML recipes** — `pi-bake build --config <yaml>`
   declarative input + `--to-yaml` to round-trip CLI flags into
   a normalized recipe + `--no-bake` to capture without baking.
@@ -91,8 +102,15 @@ just bolt it on.
   fragments exist in `pibakehub-pilot/` and a composition
   prototype lives at `tools/pibakehub_compose.py`, but the
   build path doesn't consume them yet. ROADMAP item #7.
-- **No Raspbian/Fedora/Debian backend** — Alpine only at the
-  moment. ROADMAP items #9/#10/#11.
+- **Non-Alpine bakes require sudo** — Raspbian / Debian /
+  Fedora backends use `losetup -fP` + `mount` (kernel
+  CAP_SYS_ADMIN). Operators typically run inside a privileged
+  LXC container or with passwordless sudoers entries. Alpine
+  bake stays no-root.
+- **Fedora's image isn't directly Pi-bootable** — generic ARM
+  upstream image. After bake, operator runs
+  `arm-image-installer --target=rpi4|rpi5` to inject Pi
+  firmware. Pi-bootloader-shim is a future pi-bake feature.
 
 ## Critical lessons from real-hardware deployment
 
@@ -260,10 +278,14 @@ tests/
 here. `apkfetch.py` is the second hot file (v0.2+).
 
 **Design constraint:** stdlib + PyYAML at the Python level.
-System deps: `mtools` + `dosfstools` always; `tar` + `cpio`
-when `apk_fetch: true`; `ssh-keygen` for SSH host key auto-gen.
-No root needed for Alpine baker. Raspbian backend (v0.2) will
-need sudo for losetup.
+System deps:
+- Always: `ssh-keygen` (SSH host key auto-gen).
+- Alpine baker: `mtools` + `dosfstools`, plus `tar` + `cpio` +
+  `openssl` for `packages:` bakes (apk-fetch + signed-index).
+  No root needed.
+- Raspbian / Debian / Fedora baker: `losetup` + `mount` +
+  `partprobe` + `lsblk` + `xz` + `sudo`. REQUIRES root via
+  sudo (or LXC).
 
 ## Testing
 
