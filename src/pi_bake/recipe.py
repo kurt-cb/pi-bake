@@ -477,6 +477,7 @@ def recipe_to_node_config(r: Recipe):
         ssh_host_key_pub=pub_bytes,
         config_txt=list(r.config_txt),
         modules=list(r.modules),
+        board=r.board,
     )
 
     build_kwargs = {

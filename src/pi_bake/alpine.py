@@ -39,6 +39,14 @@ LOG = logging.getLogger("pi_bake.alpine")
 
 DEFAULT_IMAGE_SIZE_MB = 400
 
+# Board-specific FAT device name. See LBU_MEDIA discussion in
+# `_write_apkovl` near the etc/lbu/lbu.conf write. Pi Zero W is
+# the only board that needs a non-default value; everything else
+# falls through to "mmcblk0".
+_LBU_MEDIA_BY_BOARD = {
+    "pi-zero-w": "mmcblk0p1",
+}
+
 
 def bake(
     *, url: str, node: NodeConfig, out_path: Path,
@@ -283,8 +291,21 @@ def _write_apkovl(
     # lbu (Alpine "local backup") writes a fresh apkovl onto the FAT
     # so the operator's post-boot changes survive reboot. Without
     # LBU_MEDIA set, `lbu commit` and even `lbu status` just print
-    # usage. mmcblk0 is the SD card's FAT partition, mounted at
-    # /media/mmcblk0 by Alpine RPi init.
+    # usage.
+    #
+    # Board-specific FAT device name (the totaldns operator hit this
+    # 2026-05-26 — without it, lbu commit on Pi Zero W silently writes
+    # to nowhere, breaking apkovl persistence):
+    #   - Pi 5 / Pi 4 / Pi 3 / Pi Zero 2 W: Alpine RPi init mounts
+    #     the FAT at /media/mmcblk0 (whole-device mount, no partition
+    #     table on the FAT). LBU_MEDIA="mmcblk0" is right.
+    #   - Pi Zero W (original, armhf): Alpine RPi init mounts at
+    #     /media/mmcblk0p1 (partition 1 of a partitioned image).
+    #     LBU_MEDIA="mmcblk0p1" is right.
+    # If node.board is unset (operator constructed NodeConfig
+    # directly without going through Recipe), fall back to mmcblk0
+    # — works for the common case.
+    lbu_media = _LBU_MEDIA_BY_BOARD.get(node.board, "mmcblk0")
     #
     # BACKUP_LIMIT=3 turns on lbu's built-in apkovl rotation: each
     # commit shifts the previous apkovl to `<host>.apkovl.tar.gz.0`,
@@ -297,9 +318,9 @@ def _write_apkovl(
     members.append((
         "etc/lbu/lbu.conf",
         (
-            b'LBU_MEDIA="mmcblk0"\n'
-            b'BACKUP_LIMIT=3\n'
-        ),
+            f'LBU_MEDIA="{lbu_media}"\n'
+            f'BACKUP_LIMIT=3\n'
+        ).encode(),
         0o644, False,
     ))
 

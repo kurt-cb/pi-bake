@@ -209,6 +209,95 @@ def test_static_ip_omits_dhcpcd_from_world(tmp_path):
     assert "dhcpcd-openrc" not in world
 
 
+def test_static_ip_writes_full_interfaces_block(tmp_path):
+    """Reinforcement test for the 2026-05-26 operator report
+    'mode: static yielded an empty interfaces file (only lo)'.
+    Verifies the WHOLE eth0 static block is written, not just
+    presence of the keyword. If this passes on current master,
+    the operator's report came from pre-#3 code OR a recipe
+    parsing issue, not the bake code."""
+    n = NodeConfig(
+        hostname="pi", ssh_pubkey=_PUBKEY,
+        static_ipv4="192.168.4.111/24", gateway_ipv4="192.168.4.1",
+    )
+    with _bake(n, tmp_path) as tf:
+        ifaces = _extract(tf, "etc/network/interfaces")
+    # Loopback comes first; eth0 block comes second.
+    assert "iface lo inet loopback\n" in ifaces
+    # eth0 block must have address + netmask + gateway, all three.
+    assert "auto eth0\n" in ifaces
+    assert "iface eth0 inet static\n" in ifaces
+    assert "address 192.168.4.111\n" in ifaces
+    assert "netmask 255.255.255.0\n" in ifaces
+    assert "gateway 192.168.4.1\n" in ifaces
+    # No `iface eth0 inet dhcp` line should appear anywhere — the
+    # operator's "empty interfaces" symptom would be missing the
+    # eth0 block entirely OR having a stray dhcp config.
+    assert "inet dhcp" not in ifaces
+
+
+def test_static_ip_writes_resolv_conf(tmp_path):
+    """Static-IP nodes don't get a resolver via dhcpcd, so the
+    bake writes /etc/resolv.conf explicitly. Without this, DNS
+    is broken on a freshly-booted static-IP Pi."""
+    n = NodeConfig(
+        hostname="pi", ssh_pubkey=_PUBKEY,
+        static_ipv4="192.168.4.111/24", gateway_ipv4="192.168.4.1",
+    )
+    with _bake(n, tmp_path) as tf:
+        resolv = _extract(tf, "etc/resolv.conf")
+    assert "nameserver" in resolv
+
+
+def test_static_ip_keeps_networking_in_runlevel(tmp_path):
+    """For static-IP boots, the `networking` service must be in
+    the default runlevel — that's what reads /etc/network/interfaces
+    + brings up the static eth0. (For DHCP boots `networking` is
+    also there for the `lo` loopback, but on static it's load-
+    bearing for the operator's static config too.)"""
+    n = NodeConfig(
+        hostname="pi", ssh_pubkey=_PUBKEY,
+        static_ipv4="192.168.4.111/24", gateway_ipv4="192.168.4.1",
+    )
+    with _bake(n, tmp_path) as tf:
+        names = set(tf.getnames())
+    assert "etc/runlevels/default/networking" in names
+
+
+def test_static_ip_end_to_end_via_recipe(tmp_path):
+    """End-to-end pipeline: YAML recipe with mode:static →
+    Recipe → NodeConfig → bake → check interfaces file. Catches
+    bugs at the YAML loader / recipe→node-config layer that the
+    direct-NodeConfig tests above miss."""
+    from pi_bake.recipe import Recipe, NetworkSpec, OutputSpec, recipe_to_node_config
+    r = Recipe(
+        hostname="pi-static",
+        board="pi-5",
+        os="alpine",
+        ssh_pubkey=_PUBKEY,
+        network=NetworkSpec(
+            mode="static",
+            address="10.0.0.42/24",
+            gateway="10.0.0.1",
+        ),
+        output=OutputSpec(path="/tmp/x.img.gz"),
+    )
+    node, _ = recipe_to_node_config(r)
+    # NodeConfig built from the recipe must carry the static IP.
+    assert node.has_static_ip
+    assert node.static_ipv4 == "10.0.0.42/24"
+    assert node.gateway_ipv4 == "10.0.0.1"
+    # And the bake reflects it.
+    with _bake(node, tmp_path) as tf:
+        ifaces = _extract(tf, "etc/network/interfaces")
+        names = set(tf.getnames())
+    assert "address 10.0.0.42\n" in ifaces
+    assert "gateway 10.0.0.1\n" in ifaces
+    # dhcpcd MUST be omitted from runlevels when static — otherwise
+    # it races with the static config.
+    assert "etc/runlevels/default/dhcpcd" not in names
+
+
 def test_default_boot_services_marker_present(tmp_path):
     """Alpine RPi's /init only wires up modloop+modules+etc. in the
     sysinit/boot runlevels when /etc/.default_boot_services is
@@ -235,6 +324,35 @@ def test_lbu_conf_sets_media(tmp_path):
     assert "LBU_MEDIA" in conf
     assert "BACKUP_LIMIT" in conf
     assert "mmcblk0" in conf
+
+
+def test_lbu_media_defaults_to_mmcblk0(tmp_path):
+    """Boards that don't appear in the board-specific mapping
+    (Pi 5, Pi 4, Pi 3, Pi Zero 2 W, and the empty/unknown case)
+    should get LBU_MEDIA="mmcblk0" — Alpine RPi init mounts the
+    FAT at /media/mmcblk0 (whole-device, no partition table)."""
+    for board in ("pi-5", "pi-4", "pi-3", "pi-zero-2-w", ""):
+        n = NodeConfig(hostname="pi", ssh_pubkey=_PUBKEY, board=board)
+        with _bake(n, tmp_path) as tf:
+            conf = _extract(tf, "etc/lbu/lbu.conf")
+        assert 'LBU_MEDIA="mmcblk0"\n' in conf, (
+            f"board {board!r}: expected mmcblk0; got {conf!r}"
+        )
+
+
+def test_lbu_media_pi_zero_w_uses_mmcblk0p1(tmp_path):
+    """Pi Zero W (original, armhf) is the only board where Alpine
+    RPi init mounts the FAT at /media/mmcblk0p1 (partition 1 of a
+    partitioned image, not the whole device). With the wrong
+    LBU_MEDIA, `lbu commit` silently writes to nowhere and the
+    operator's deploy state doesn't persist. Regression test for
+    the 2026-05-26 totaldns Pi Zero W bug report."""
+    n = NodeConfig(hostname="pi", ssh_pubkey=_PUBKEY, board="pi-zero-w")
+    with _bake(n, tmp_path) as tf:
+        conf = _extract(tf, "etc/lbu/lbu.conf")
+    assert 'LBU_MEDIA="mmcblk0p1"\n' in conf
+    # And explicitly NOT the wrong value:
+    assert 'LBU_MEDIA="mmcblk0"\n' not in conf
 
 
 def test_sshd_config_omits_unsupported_directives(tmp_path):

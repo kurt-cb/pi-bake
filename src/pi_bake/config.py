@@ -74,6 +74,15 @@ class NodeConfig:
     # builtins; this is the override for cards that need an
     # explicit modprobe before the runlevel using them comes up.
     modules: list[str] = field(default_factory=list)
+    # Board slug (e.g. "pi-5", "pi-zero-w"). Optional — used by
+    # the backend to make board-specific decisions, e.g. picking
+    # the right LBU_MEDIA name in /etc/lbu/lbu.conf (Pi Zero W
+    # needs `mmcblk0p1`, every other supported board needs
+    # `mmcblk0`). Empty default = backend uses board-agnostic
+    # fallback values where possible. The recipe loader always
+    # populates this from Recipe.board; only direct NodeConfig()
+    # users need to set it manually.
+    board: str = ""
     # SSH host keypair baked into /etc/ssh/. Both bytes-fields set
     # together OR both empty.
     #
