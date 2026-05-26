@@ -6,33 +6,50 @@ latest stable RPi tarball for bootloader/FAT layout, but point
 the kernel forward."
 
 That design **does not work in practice on Alpine RPi diskless**.
-The operator's reproduction:
+Operator reproduction: `uname -r` reports stable kernel forever,
+`iwlwifi` modules missing, BE200 doesn't enumerate. The
+post-boot upgrade path can't physically rewrite the kernel +
+modules + initramfs because (1) FAT is mounted ro, (2) modloop
+is squashfs (also ro), (3) `apk info -L linux-rpi` returns
+empty (Alpine packages boot artefacts via install-time hooks,
+not via the file list), (4) those hooks don't fire correctly
+outside a fresh `setup-alpine` flow, (5) `mkinitfs` isn't
+installed on the running Pi anyway.
 
-  $ uname -r
-  6.12.13-0-rpi          # ← stable's kernel, NOT edge's 6.12.85+
-  $ modinfo iwlwifi
-  modinfo: module 'iwlwifi' not found
+The fix is to do the upgrade **at bake time** in a separate
+chroot.
 
-Why:
-  1. /media/mmcblk0 (FAT) is mounted ro by default on the running Pi.
-  2. `apk fix linux-rpi --reinstall` doesn't update the FAT's
-     vmlinuz-rpi / initramfs-rpi / modloop-rpi.
-  3. `apk info -L linux-rpi` returns an empty file list on Alpine
-     — the boot artefacts come from install-time hooks (mkinitfs)
-     that don't fire correctly outside `setup-alpine`.
-  4. Even if regenerated, /lib/modules is a squashfs (modloop-rpi)
-     mount — read-only by design.
+Architecture (v0.2.2 rewrite, after v0.2.1's first attempt
+chrooted into the FAT tarball — which has no /sbin/apk and
+fails immediately):
 
-Net: the post-boot `apk upgrade` path can't physically rewrite
-the kernel + modules + initramfs on a diskless Alpine RPi.
-
-The fix is to do the upgrade **at bake time** by running apk in a
-chroot of the extracted Alpine RPi tarball, using qemu-user-static
-to execute aarch64 binaries on the bake host. This triggers the
-proper install hooks (mkinitfs) which regenerate vmlinuz-rpi,
-initramfs-rpi, modloop-rpi inside the chroot's /boot. Those files
-get mcopy'd into the FAT image as usual; the sealed `.img.gz`
-ships with the edge kernel pre-installed.
+  1. Download alpine-minirootfs-<ver>-<arch>.tar.gz from
+     Alpine's `releases/<arch>/` directory. This IS a chroot-
+     ready busybox + musl + apk-tools rootfs (~3.8 MB), as
+     opposed to the RPi tarball which is FAT-layout boot files
+     + an apk cache (not chroot-able).
+  2. Extract the minirootfs into a SEPARATE tmpdir — DON'T
+     pollute the RPi tarball tree. We want to mcopy the RPi
+     tarball into FAT untouched except for the boot artefacts
+     we replace.
+  3. Copy qemu-<arch>-static + /etc/resolv.conf into the
+     chroot, bind-mount /proc /sys /dev (binfmt_misc handles
+     transparent aarch64 binary execution).
+  4. Point the chroot's /etc/apk/repositories at edge main +
+     community.
+  5. `apk update` + `apk upgrade --available --latest` to bring
+     the whole chroot to edge (avoids musl/apk-tools version
+     skew between stable minirootfs and edge linux-rpi).
+  6. `apk add linux-rpi linux-firmware-rpi mkinitfs`. The
+     mkinitfs install hook regenerates /boot/vmlinuz-rpi +
+     /boot/initramfs-rpi + /boot/modloop-rpi inside the chroot.
+  7. Copy those three boot artefacts FROM chroot/boot/ TO
+     extracted_root/boot/ — replacing the stable versions that
+     came with the RPi tarball. (modloop-rpi IS the squashfs
+     of /lib/modules/<edge-ver>/, so this single copy carries
+     the entire edge module set.)
+  8. Cleanup: unmount binds, delete chroot dir, remove staged
+     qemu binary.
 
 Bake-host requirements
 ----------------------
@@ -58,7 +75,10 @@ import logging
 import os
 import shutil
 import subprocess
+import tarfile
 from pathlib import Path
+
+from pi_bake.download import fetch
 
 LOG = logging.getLogger("pi_bake.alpine_edge")
 
@@ -67,10 +87,16 @@ LOG = logging.getLogger("pi_bake.alpine_edge")
 EDGE_REPO_MAIN = "http://dl-cdn.alpinelinux.org/alpine/edge/main"
 EDGE_REPO_COMMUNITY = "http://dl-cdn.alpinelinux.org/alpine/edge/community"
 
-# Packages to upgrade to edge. linux-rpi pulls the kernel + modules;
-# linux-firmware-rpi pulls the firmware blobs. We also upgrade
-# `mkinitfs` itself so its hook runs against current edge tooling.
+# Packages installed (with edge repos active) to bring in the
+# edge kernel + firmware + boot-artefact generator. mkinitfs's
+# install hook regenerates /boot/{vmlinuz-rpi,initramfs-rpi,
+# modloop-rpi} when linux-rpi installs.
 EDGE_UPGRADE_PACKAGES = ("mkinitfs", "linux-rpi", "linux-firmware-rpi")
+
+# Boot artefacts we copy OUT of the chroot INTO the RPi tarball
+# tree after the upgrade. Order: kernel, initramfs, kernel-module
+# squashfs.
+_BOOT_ARTEFACTS = ("vmlinuz-rpi", "initramfs-rpi", "modloop-rpi")
 
 
 class EdgeKernelSkipped(Exception):
@@ -129,17 +155,44 @@ def check_requirements(target_arch: str = "aarch64") -> None:
         raise EdgeKernelSkipped("chroot not on PATH (impossible?)")
 
 
-def upgrade_to_edge_kernel(
-    extracted_root: Path, target_arch: str = "aarch64",
-) -> None:
-    """Replace the extracted tarball's stable kernel with edge.
+def minirootfs_url(rpi_tarball_url: str) -> str:
+    """Derive the matching alpine-minirootfs URL from a RPi tarball URL.
 
-    Runs apk inside a chroot of the extracted Alpine RPi tarball,
-    pointing /etc/apk/repositories at edge. The linux-rpi /
-    linux-firmware-rpi / mkinitfs upgrade triggers the mkinitfs
-    install hook, which regenerates the boot artefacts in /boot
-    of the chroot. Those files then get mcopy'd into the FAT
-    image by the normal bake flow.
+    Both URLs share the same {branch, arch, version} path structure;
+    only the filename prefix differs:
+
+      alpine-rpi-<ver>-<arch>.tar.gz       (FAT-layout, NOT chroot-able)
+      alpine-minirootfs-<ver>-<arch>.tar.gz  (chroot-ready rootfs)
+
+    Example:
+      in  : .../v3.21/releases/aarch64/alpine-rpi-3.21.4-aarch64.tar.gz
+      out : .../v3.21/releases/aarch64/alpine-minirootfs-3.21.4-aarch64.tar.gz
+    """
+    if "alpine-rpi-" not in rpi_tarball_url:
+        raise ValueError(
+            f"can't derive minirootfs URL from {rpi_tarball_url!r} "
+            f"(expected 'alpine-rpi-' in path)"
+        )
+    return rpi_tarball_url.replace("alpine-rpi-", "alpine-minirootfs-")
+
+
+def upgrade_to_edge_kernel(
+    extracted_root: Path,
+    *,
+    rpi_tarball_url: str,
+    workdir: Path,
+    target_arch: str = "aarch64",
+) -> None:
+    """Replace the extracted RPi tarball's stable kernel with edge.
+
+    Bakes a fresh chroot from alpine-minirootfs (the actual rootfs
+    tarball — separate from the FAT-layout RPi tarball), upgrades
+    that chroot's kernel to edge via apk-in-chroot + qemu-user-static,
+    then copies the resulting /boot/{vmlinuz-rpi, initramfs-rpi,
+    modloop-rpi} into `extracted_root/boot/`. The RPi tarball's
+    other contents (bootcode.bin, start4.elf, overlays/, apks/,
+    etc.) are left untouched — only the 3 boot artefacts get
+    swapped to edge.
 
     Pre-conditions (check via `check_requirements()` first):
       - bake host is root
@@ -147,49 +200,67 @@ def upgrade_to_edge_kernel(
       - network access to dl-cdn.alpinelinux.org
 
     Side effects in `extracted_root` after this returns:
-      - /boot/vmlinuz-rpi, initramfs-rpi, modloop-rpi: edge versions
-      - /lib/modules/<edge-version>/: kernel modules for edge
-      - /etc/apk/repositories: points at edge (NOT reverted — the
-        apkovl writer rewrites this to its own value later, so
-        leaving edge here is harmless)
+      - /boot/vmlinuz-rpi, /boot/initramfs-rpi, /boot/modloop-rpi:
+        edge versions
+      - Nothing else changed
+
+    Side effects in `workdir`:
+      - workdir/edge-chroot/ created (not cleaned up — caller's
+        tempdir is normally a TemporaryDirectory, gets cleaned at
+        with-block exit)
     """
-    LOG.info("edge kernel upgrade: chroot=%s arch=%s",
+    LOG.info("edge kernel upgrade: target=%s arch=%s",
              extracted_root, target_arch)
     check_requirements(target_arch)
 
-    # Copy the static qemu binary into the chroot so binfmt_misc
-    # can find it when executing aarch64 binaries via the chroot.
+    # Step 1. Download alpine-minirootfs at the same stable version
+    # as the RPi tarball. download.fetch() caches + verifies sha256
+    # against the .sha256 sidecar.
+    mr_url = minirootfs_url(rpi_tarball_url)
+    LOG.info("edge kernel upgrade: fetching minirootfs %s",
+             mr_url.rsplit("/", 1)[-1])
+    mr_tarball = fetch(mr_url)
+
+    # Step 2. Extract minirootfs into a SEPARATE tmpdir.
+    chroot = workdir / "edge-chroot"
+    chroot.mkdir(parents=True, exist_ok=True)
+    LOG.info("edge kernel upgrade: extracting minirootfs → %s", chroot)
+    with tarfile.open(mr_tarball, "r:*") as tf:
+        try:
+            tf.extractall(chroot, filter="data")
+        except TypeError:
+            tf.extractall(chroot)
+
+    # Step 3. Copy qemu-static + resolv.conf into the chroot.
+    # binfmt_misc with the `F` flag preserves the interpreter at
+    # registration time, but per-distro defaults vary — copying
+    # qemu into the chroot's /usr/bin is the belt-and-suspenders
+    # path that works regardless.
     qemu_src = shutil.which(f"qemu-{target_arch}-static")
     assert qemu_src is not None   # check_requirements verified
-    qemu_dst = extracted_root / "usr/bin" / Path(qemu_src).name
+    qemu_dst = chroot / "usr/bin" / Path(qemu_src).name
     qemu_dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy(qemu_src, qemu_dst)
     qemu_dst.chmod(0o755)
 
-    # Point apk inside the chroot at edge repos. The chroot's
-    # /etc/apk/repositories pre-existing entries (typically
-    # `/media/mmcblk0/apks` from the tarball) would block this if
-    # we left them — apk would resolve to the stable cache first.
-    # Overwrite with edge-only for the duration of the upgrade.
-    repos = extracted_root / "etc/apk/repositories"
+    host_resolv = Path("/etc/resolv.conf")
+    chroot_resolv = chroot / "etc/resolv.conf"
+    if host_resolv.is_file():
+        chroot_resolv.parent.mkdir(parents=True, exist_ok=True)
+        # `cp` (not symlink) because the chroot may resolve names
+        # outside of host's resolver namespace.
+        shutil.copy(host_resolv, chroot_resolv)
+
+    # Step 4. Point chroot's apk at edge.
+    repos = chroot / "etc/apk/repositories"
     repos.parent.mkdir(parents=True, exist_ok=True)
     repos.write_text(f"{EDGE_REPO_MAIN}\n{EDGE_REPO_COMMUNITY}\n")
 
-    # Copy resolv.conf so apk inside the chroot can resolve
-    # dl-cdn.alpinelinux.org. (The apkovl writer later overwrites
-    # /etc/resolv.conf for static-IP nodes; for DHCP nodes dhcpcd
-    # writes it post-boot. Either way, this temporary copy doesn't
-    # affect the final image.)
-    host_resolv = Path("/etc/resolv.conf")
-    chroot_resolv = extracted_root / "etc/resolv.conf"
-    if host_resolv.is_file():
-        shutil.copy(host_resolv, chroot_resolv)
-
-    # Bind-mount /proc, /sys, /dev so apk's hooks have a working
-    # /proc/self/exe etc. (mkinitfs reads /proc for kernel version).
+    # Bind /proc /sys /dev — install hooks read /proc for kernel
+    # info, mkinitfs reads /proc/self/mounts, etc.
     binds = ("proc", "sys", "dev")
     for d in binds:
-        target = extracted_root / d
+        target = chroot / d
         target.mkdir(exist_ok=True)
         subprocess.run(
             ["mount", "--bind", f"/{d}", str(target)],
@@ -197,61 +268,74 @@ def upgrade_to_edge_kernel(
         )
 
     try:
-        # Refresh apk's view of edge repos.
+        # Step 5. Refresh apk's view of edge + upgrade base packages.
+        # `apk upgrade --available --latest` brings the chroot's
+        # musl/busybox/apk-tools to edge versions, avoiding any
+        # cross-version dep weirdness when linux-rpi installs.
         LOG.info("edge kernel upgrade: apk update")
-        r = subprocess.run(
-            ["chroot", str(extracted_root),
-             "/sbin/apk", "update", "--no-cache"],
-            capture_output=True, text=True,
-        )
-        if r.returncode != 0:
-            raise RuntimeError(
-                f"chroot apk update failed (rc={r.returncode}):\n"
-                f"stdout: {r.stdout}\nstderr: {r.stderr}"
-            )
+        _run_chroot(chroot, ["/sbin/apk", "update", "--no-cache"])
 
-        # Upgrade kernel + firmware + mkinitfs. The mkinitfs hook
-        # regenerates /boot/vmlinuz-rpi / initramfs-rpi / modloop-rpi.
-        LOG.info("edge kernel upgrade: apk upgrade %s",
+        LOG.info("edge kernel upgrade: apk upgrade --available --latest")
+        _run_chroot(
+            chroot,
+            ["/sbin/apk", "upgrade", "--available", "--latest",
+             "--no-cache"],
+        )
+
+        # Step 6. Install linux-rpi + linux-firmware-rpi + mkinitfs.
+        # mkinitfs's post-install hook regenerates the boot
+        # artefacts in /boot.
+        LOG.info("edge kernel upgrade: apk add %s",
                  " ".join(EDGE_UPGRADE_PACKAGES))
-        r = subprocess.run(
-            ["chroot", str(extracted_root),
-             "/sbin/apk", "add", "--upgrade", "--latest",
-             *EDGE_UPGRADE_PACKAGES],
-            capture_output=True, text=True,
+        _run_chroot(
+            chroot,
+            ["/sbin/apk", "add", "--no-cache", *EDGE_UPGRADE_PACKAGES],
         )
-        if r.returncode != 0:
+
+        # Verify the artefacts were produced.
+        chroot_boot = chroot / "boot"
+        missing = [f for f in _BOOT_ARTEFACTS
+                   if not (chroot_boot / f).is_file()]
+        if missing:
             raise RuntimeError(
-                f"chroot apk upgrade failed (rc={r.returncode}):\n"
-                f"stdout: {r.stdout}\nstderr: {r.stderr}"
+                f"edge upgrade ran but {missing} missing from "
+                f"{chroot_boot} — mkinitfs hook may not have fired. "
+                f"List what IS there:\n"
+                f"{sorted(p.name for p in chroot_boot.iterdir())}"
             )
 
-        # Verify the edge kernel landed.
-        boot = extracted_root / "boot"
-        for f in ("vmlinuz-rpi", "initramfs-rpi", "modloop-rpi"):
-            if not (boot / f).is_file():
-                raise RuntimeError(
-                    f"edge upgrade ran but {boot / f} missing — "
-                    f"mkinitfs hook may not have fired."
-                )
-
-        # Report what we ended up with so the operator can sanity-
-        # check the bake log.
+        # Step 7. Replace stable boot artefacts with edge ones in
+        # the RPi tarball tree.
+        target_boot = extracted_root / "boot"
+        target_boot.mkdir(parents=True, exist_ok=True)
+        for f in _BOOT_ARTEFACTS:
+            src = chroot_boot / f
+            dst = target_boot / f
+            shutil.copy(src, dst)
         sizes = {
-            f: (boot / f).stat().st_size
-            for f in ("vmlinuz-rpi", "initramfs-rpi", "modloop-rpi")
+            f: (target_boot / f).stat().st_size
+            for f in _BOOT_ARTEFACTS
         }
-        LOG.info("edge kernel upgrade: post-upgrade boot files: %s",
+        LOG.info("edge kernel upgrade: boot artefacts swapped → %s",
                  sizes)
+
     finally:
-        # Unmount the binds. Reverse order to handle nested mounts.
+        # Step 8. Cleanup binds (reverse order for safety).
         for d in reversed(binds):
             subprocess.run(
-                ["umount", "-l", str(extracted_root / d)],
+                ["umount", "-l", str(chroot / d)],
                 check=False, capture_output=True,
             )
-        # Remove the staging qemu binary (don't ship it in the image).
-        try:
-            qemu_dst.unlink()
-        except FileNotFoundError:
-            pass
+
+
+def _run_chroot(chroot: Path, argv: list[str]) -> None:
+    """`chroot <chroot> <argv...>` with full stderr on failure."""
+    cmd = ["chroot", str(chroot), *argv]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError(
+            f"chroot command failed (rc={r.returncode}):\n"
+            f"  cmd: {' '.join(cmd)}\n"
+            f"  stdout: {r.stdout}\n"
+            f"  stderr: {r.stderr}"
+        )

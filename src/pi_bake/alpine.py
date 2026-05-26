@@ -107,16 +107,23 @@ def bake(
                 tf.extractall(extracted)
 
         # 2.4. Bake-time edge kernel upgrade when alpine_branch=edge.
-        # Replaces the stable kernel + modules + initramfs in the
-        # extracted tarball with the current edge versions via
-        # apk-in-chroot using qemu-user-static. Skipped (with a
-        # clear warning) when bake host lacks root / qemu /
-        # binfmt_misc — image stays bootable but ships the stable
-        # kernel. See alpine_edge.py for the architecture.
+        # Spins up a separate alpine-minirootfs chroot, upgrades
+        # linux-rpi + linux-firmware-rpi + mkinitfs to edge inside
+        # it via qemu-user-static, then copies the resulting
+        # /boot/{vmlinuz-rpi, initramfs-rpi, modloop-rpi} into the
+        # extracted RPi tarball tree (replacing the stable versions).
+        # Skipped (with a clear warning) when bake host lacks root /
+        # qemu / binfmt_misc — image stays bootable but ships the
+        # stable kernel. See alpine_edge.py for the architecture.
         if alpine_branch == "edge":
             from pi_bake import alpine_edge
             try:
-                alpine_edge.upgrade_to_edge_kernel(extracted, target_arch=arch)
+                alpine_edge.upgrade_to_edge_kernel(
+                    extracted,
+                    rpi_tarball_url=url,
+                    workdir=td,
+                    target_arch=arch,
+                )
             except alpine_edge.EdgeKernelSkipped as e:
                 LOG.warning("edge kernel upgrade SKIPPED: %s", e)
                 LOG.warning(

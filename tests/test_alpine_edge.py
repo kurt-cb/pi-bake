@@ -1,16 +1,14 @@
 """alpine_edge module tests — bake-time edge kernel upgrade.
 
-Coverage focus: the `check_requirements()` skip-paths. Each
-missing prereq must surface a clear `EdgeKernelSkipped` error
-with actionable install hints — operators trying to use
-`os_version: edge` should know exactly what to fix when the
-upgrade is skipped.
+Coverage focus:
+  - check_requirements() skip-paths (each prereq, individually)
+  - minirootfs_url() derivation from the RPi tarball URL
 
 NOT covered here: the actual chroot+qemu apk-upgrade run.
 That needs root + qemu-user-static + binfmt_misc + network
-+ a fully-extracted Alpine RPi tarball. Verified manually
-when the operator runs an edge bake on a host that has those
-deps (see alpine_edge.py docstring for the install path).
++ extracted Alpine minirootfs. Verified by running an edge
+bake on a host with those deps (see alpine_edge.py docstring
+for the install path).
 """
 from __future__ import annotations
 
@@ -21,7 +19,9 @@ from pathlib import Path
 import pytest
 
 from pi_bake import alpine_edge
-from pi_bake.alpine_edge import EdgeKernelSkipped, check_requirements
+from pi_bake.alpine_edge import (
+    EdgeKernelSkipped, check_requirements, minirootfs_url,
+)
 
 
 def test_skip_when_not_root(monkeypatch):
@@ -117,3 +117,32 @@ def test_constants_well_formed():
     assert "linux-rpi" in alpine_edge.EDGE_UPGRADE_PACKAGES
     assert "linux-firmware-rpi" in alpine_edge.EDGE_UPGRADE_PACKAGES
     assert "mkinitfs" in alpine_edge.EDGE_UPGRADE_PACKAGES
+
+
+# --------------------------------------------------------------------------- #
+# minirootfs_url derivation (v0.2.2 fix for the v0.2.1 chroot-target bug)      #
+# --------------------------------------------------------------------------- #
+
+def test_minirootfs_url_aarch64():
+    """Pi 5 / Pi 4 / CM4 / Pi Zero 2 W — aarch64."""
+    rpi = ("https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/"
+           "aarch64/alpine-rpi-3.21.4-aarch64.tar.gz")
+    mr = minirootfs_url(rpi)
+    assert mr == ("https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/"
+                  "aarch64/alpine-minirootfs-3.21.4-aarch64.tar.gz")
+
+
+def test_minirootfs_url_armhf():
+    """Pi Zero W original — armhf."""
+    rpi = ("https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/"
+           "armhf/alpine-rpi-3.21.4-armhf.tar.gz")
+    mr = minirootfs_url(rpi)
+    assert "alpine-minirootfs-3.21.4-armhf.tar.gz" in mr
+    assert "alpine-rpi" not in mr
+
+
+def test_minirootfs_url_rejects_non_rpi_url():
+    """Catch operator errors / oses.py refactors that change the
+    URL shape away from the alpine-rpi-* convention."""
+    with pytest.raises(ValueError, match="alpine-rpi-"):
+        minirootfs_url("https://example.org/some-other-tarball.tar.gz")
