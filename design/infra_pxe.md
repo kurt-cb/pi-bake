@@ -382,6 +382,8 @@ ssh fedora@192.168.4.51      # Fedora
 | Unknown DHCP request from non-Pi devices | Lab LAN has other clients | Acceptable — dnsmasq will lease them from the range; only Pis tagged `rpi-any` get the PXE-specific options |
 | `tftp-no-blocksize` warning at dnsmasq startup | Old dnsmasq version | Upgrade dnsmasq, or remove that line (its absence is harmless on most Pi bootloaders) |
 | `losetup` errors in `tools/img-to-tftp.sh` | LXC container doesn't have CAP_SYS_ADMIN | Run the script on the host, or grant the LXC the right capability |
+| `interface=eth0` in conf, dnsmasq starts fine but `ss -ulnp` shows no `:67` listener | dnsmasq's `bind-interfaces` requires the named interface to exist; if the actual LAN NIC is `enp0s3` / `eno1` / etc., DHCP is silently skipped | `ip -br link` to find the real LAN iface name; set `interface=<actual>` in the conf; `systemctl restart dnsmasq`; confirm `ss -ulnp` now lists `:67` |
+| tcpdump sees Pi's DHCPDISCOVER on `enp0s3` but dnsmasq logs nothing (even with `log-dhcp`); `ss -ulnp` confirms dnsmasq IS bound to UDP 67 on the right iface | **Firewalld** is dropping the broadcast before it reaches dnsmasq. Default Fedora `FedoraWorkstation` zone allows `dhcpv6-client` (host AS DHCP client) but NOT `dhcp` (host AS DHCP server). Same for the trailing `iifname "enp0s3" reject` catch-all rule. | `sudo firewall-cmd --zone=<zone> --add-service=dhcp --permanent` (also `--add-service=tftp` if not already), then `sudo firewall-cmd --reload`. Verify: `sudo firewall-cmd --info-zone=<zone> \| grep services` shows `dhcp`. Verified on Fedora Workstation 41–43. |
 
 ---
 
