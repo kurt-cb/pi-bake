@@ -63,6 +63,17 @@ class NodeConfig:
     # synthesized placeholder. Useful for exercising mDNS-based
     # hostname recovery paths on the DHCP server side.
     dhcp_send_hostname: bool = True
+    # FAT-side /boot/usercfg.txt edits — one line per entry, in
+    # the literal form the bootloader expects (`dtoverlay=...`,
+    # `dtparam=...`, etc.). Appended to usercfg.txt which the
+    # stock Alpine RPi config.txt `include`s, so we layer cleanly
+    # without touching the shipped file.
+    config_txt: list[str] = field(default_factory=list)
+    # Kernel modules forced loaded at boot via /etc/modules in
+    # the apkovl. Most modules autoload via udev / kernel
+    # builtins; this is the override for cards that need an
+    # explicit modprobe before the runlevel using them comes up.
+    modules: list[str] = field(default_factory=list)
     # SSH host keypair baked into /etc/ssh/. Both bytes-fields set
     # together OR both empty.
     #

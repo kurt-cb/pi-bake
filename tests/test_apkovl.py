@@ -440,3 +440,43 @@ def test_install_extras_online_unchanged_when_apk_fetch_off(tmp_path):
     assert "apk add avahi dbus" in script
     assert "--no-network" not in script
     assert "--allow-untrusted" not in script
+
+
+# --------------------------------------------------------------------------- #
+# HAT overlays — /etc/modules in apkovl (FAT-side usercfg.txt tested via bake)#
+# --------------------------------------------------------------------------- #
+
+def test_etc_modules_absent_when_node_has_no_modules(tmp_path):
+    """No node.modules → no /etc/modules in the apkovl. Operators
+    who don't need explicit modprobe shouldn't see the file at all
+    (avoids confusion / lint noise)."""
+    n = NodeConfig(hostname="pi", ssh_pubkey=_PUBKEY)
+    with _bake(n, tmp_path) as tf:
+        names = set(tf.getnames())
+    assert "etc/modules" not in names
+
+
+def test_etc_modules_present_when_node_lists_modules(tmp_path):
+    """node.modules → /etc/modules in apkovl, one module per line,
+    in declared order. Order matters — drivers with load-order
+    dependencies (e.g. spi-bcm2835 before mcp251x) need predictable
+    ordering."""
+    n = NodeConfig(
+        hostname="pi", ssh_pubkey=_PUBKEY,
+        modules=["spi_bcm2835", "mcp251x", "can_dev"],
+    )
+    with _bake(n, tmp_path) as tf:
+        body = _extract(tf, "etc/modules")
+    lines = [l for l in body.splitlines() if l and not l.startswith("#")]
+    assert lines == ["spi_bcm2835", "mcp251x", "can_dev"]
+
+
+def test_etc_modules_mode_0644(tmp_path):
+    """/etc/modules is world-readable config; root-only is wrong."""
+    n = NodeConfig(
+        hostname="pi", ssh_pubkey=_PUBKEY,
+        modules=["mcp251x"],
+    )
+    with _bake(n, tmp_path) as tf:
+        info = tf.getmember("etc/modules")
+    assert info.mode == 0o644

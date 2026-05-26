@@ -172,3 +172,35 @@ network:
 # package above (+ recursive deps) into the FAT image at bake time
 # so the Pi installs them offline on first boot. Default false.
 # apk_fetch: true
+
+# --------------------------------------------------------------------------
+# HAT / PERIPHERAL CONFIG — config.txt + kernel modules
+# --------------------------------------------------------------------------
+# Lines appended to /boot/usercfg.txt on the FAT partition. The stock
+# Alpine RPi config.txt includes usercfg.txt at the bottom, so additions
+# layer cleanly without editing the shipped file. Use for HAT-specific
+# enablement: dtoverlay= / dtparam= / enable_uart= / etc. One entry
+# per list item, in the literal form the bootloader expects.
+#
+# Examples:
+#   - dtparam=pciex1                # Pi 5 PCIe (e.g. for M.2 HAT+)
+#   - dtparam=spi=on                # SPI bus for SPI-attached HATs
+#   - dtoverlay=mcp2515-can0,oscillator=12000000,interrupt=25
+#   - dtoverlay=disable-bt          # frees /dev/serial0 for RS485
+#   - enable_uart=1                 # hardware UART (PL011)
+#   - dtparam=i2c_arm=on            # I2C bus
+#
+# See examples/pi-5-can-rs485.yaml for a full HAT recipe.
+
+# config_txt:
+#   - dtparam=spi=on
+#   - dtoverlay=mcp2515-can0,oscillator=12000000,interrupt=25,spimaxfrequency=2000000
+
+# Kernel modules to force loaded at boot — written to /etc/modules in
+# the apkovl, one per line, in declared order. Most modules autoload
+# via udev once a matching dtoverlay is in place; this is the override
+# for cards that need an explicit modprobe before their runlevel.
+
+# modules:
+#   - mcp251x
+#   - can_dev

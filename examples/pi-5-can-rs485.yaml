@@ -1,0 +1,54 @@
+# Pi 5 + Waveshare RS485 CAN HAT (MCP2515) — wired DHCP.
+#
+# Demonstrates the v0.3 HAT-overlay support (#6 in ROADMAP.md):
+# `config_txt:` adds boot-time dtparam/dtoverlay lines via FAT
+# `usercfg.txt`; `modules:` forces kernel modules at boot via the
+# apkovl's /etc/modules.
+#
+# Hardware: Waveshare RS485 CAN HAT
+# (https://www.waveshare.com/wiki/RS485_CAN_HAT). MCP2515 SPI CAN
+# controller + SP3485 RS485 transceiver. The dtoverlay assumes the
+# 12 MHz crystal variant — change `oscillator=` to 8000000 for the
+# older 8 MHz revision.
+#
+# Post-flash, bring CAN0 up:
+#   sudo ip link set can0 up type can bitrate 1000000
+#   sudo ifconfig can0 txqueuelen 65536
+# Then `cansend` / `candump` from can-utils. RS485 lands on
+# /dev/serial0 once disable-bt + enable_uart take effect.
+
+hostname: can-pi
+board: pi-5
+os: alpine
+os_version: edge                  # mainline kernel for current SPI/CAN drivers
+
+ssh_pubkey: ~/.ssh/totaldns-adhoc.pub
+
+network:
+  mode: dhcp
+  send_hostname: true
+
+# HAT-specific boot-time enablement, appended to /boot/usercfg.txt
+# (stock Alpine config.txt includes usercfg.txt already).
+config_txt:
+  - dtparam=spi=on
+  - dtoverlay=mcp2515-can0,oscillator=12000000,interrupt=25,spimaxfrequency=2000000
+  - enable_uart=1
+  - dtoverlay=disable-bt          # frees /dev/serial0 for RS485
+
+# Force the CAN + SPI modules at boot. udev usually autoloads these
+# once the dtoverlay matches but listing them removes any race with
+# slow-coming runlevels.
+modules:
+  - mcp251x
+  - can_dev
+
+# CAN userspace tooling. apk_fetch: true pulls these + recursive
+# deps at bake time so the Pi can install offline on first boot.
+packages:
+  - can-utils
+
+apk_fetch: true
+
+output:
+  path: ~/sdcards/can-pi.img.gz

@@ -50,7 +50,8 @@ except ImportError as e:   # pragma: no cover
 _TOP_KEYS = frozenset({
     "hostname", "board", "os", "os_version", "timezone",
     "ssh_pubkey", "extra_pubkeys", "ssh_host_key",
-    "network", "wifi", "packages", "apk_fetch", "output",
+    "network", "wifi", "packages", "apk_fetch",
+    "config_txt", "modules", "output",
 })
 _NETWORK_KEYS = frozenset({"mode", "address", "gateway", "send_hostname"})
 _WIFI_KEYS    = frozenset({"ssid", "psk", "country"})
@@ -165,6 +166,22 @@ class Recipe:
     Empty (default): the baker generates a fresh ed25519 pair at
     bake time. Stable across reflashes of the same .img.gz;
     changes on each new `pi-bake build`.
+
+    `config_txt`: list of `dtoverlay=` / `dtparam=` / etc. lines
+    appended to `/boot/usercfg.txt` on the FAT partition. The
+    stock RPi config.txt `include`s usercfg.txt, so additions
+    layer cleanly without editing the shipped file. Use for
+    HAT-specific enablement (e.g. `dtparam=pciex1` for PCIe on
+    the Pi 5, `dtoverlay=mcp2515-can0,...` for SPI CAN HATs).
+    Operator declares one line per list entry, in the literal
+    form that goes into the file.
+
+    `modules`: list of kernel module names written to
+    `/etc/modules` in the apkovl, one per line. OpenRC's
+    `kmod-static-nodes` + the kernel's udev autoload generally
+    cover most cases, but `modules:` is the override for cards
+    that need an explicit `modprobe` at boot (e.g. `mcp251x`
+    for the MCP2515 CAN controller). Order is preserved.
     """
     hostname: str
     board: str
@@ -179,6 +196,8 @@ class Recipe:
     packages: list[str] = field(default_factory=list)
     apk_fetch: bool = False
     ssh_host_key: str = ""
+    config_txt: list[str] = field(default_factory=list)
+    modules: list[str] = field(default_factory=list)
 
 
 # --------------------------------------------------------------------------- #
@@ -261,6 +280,28 @@ def _from_dict(d: dict, *, source: str = "<dict>") -> Recipe:
             f"got {type(apk_fetch_raw).__name__}"
         )
 
+    config_txt = d.get("config_txt") or []
+    if not isinstance(config_txt, list):
+        raise ValueError(
+            f"{source}: `config_txt` must be a list of strings, "
+            f"got {type(config_txt).__name__}"
+        )
+    if not all(isinstance(line, str) for line in config_txt):
+        raise ValueError(
+            f"{source}: every entry in `config_txt` must be a string"
+        )
+
+    modules = d.get("modules") or []
+    if not isinstance(modules, list):
+        raise ValueError(
+            f"{source}: `modules` must be a list of strings, "
+            f"got {type(modules).__name__}"
+        )
+    if not all(isinstance(m, str) for m in modules):
+        raise ValueError(
+            f"{source}: every entry in `modules` must be a string"
+        )
+
     return Recipe(
         hostname=d["hostname"],
         board=d["board"],
@@ -275,6 +316,8 @@ def _from_dict(d: dict, *, source: str = "<dict>") -> Recipe:
         packages=list(packages),
         apk_fetch=apk_fetch_raw,
         ssh_host_key=d.get("ssh_host_key") or "",
+        config_txt=list(config_txt),
+        modules=list(modules),
     )
 
 
@@ -340,6 +383,19 @@ def dump_recipe(r: Recipe) -> str:
         lines.append("")
         lines.append("# Bake-time apk-fetch: stage extras + deps offline.")
         lines.append("apk_fetch: true")
+    if r.config_txt:
+        lines.append("")
+        lines.append("# Lines appended to /boot/usercfg.txt on FAT —")
+        lines.append("# dtoverlay= / dtparam= for HATs + peripherals.")
+        lines.append("config_txt:")
+        for line in r.config_txt:
+            lines.append(f"  - {_yaml_str(line)}")
+    if r.modules:
+        lines.append("")
+        lines.append("# Kernel modules written to /etc/modules (one per line).")
+        lines.append("modules:")
+        for m in r.modules:
+            lines.append(f"  - {_yaml_str(m)}")
     lines.append("")
     lines.append("# Where the .img.gz lands")
     lines.append("output:")
@@ -419,6 +475,8 @@ def recipe_to_node_config(r: Recipe):
         dhcp_send_hostname=r.network.send_hostname,
         ssh_host_key_priv=priv_bytes,
         ssh_host_key_pub=pub_bytes,
+        config_txt=list(r.config_txt),
+        modules=list(r.modules),
     )
 
     build_kwargs = {

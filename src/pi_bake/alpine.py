@@ -127,6 +127,17 @@ def bake(
             )
             apk_fetch_used = True
 
+        # 2.6. Optional: /boot/usercfg.txt FAT edit (Recipe.config_txt).
+        # The stock Alpine config.txt has `include usercfg.txt` already,
+        # so the bootloader picks our additions up without touching the
+        # shipped file. Used for HAT enablement (dtoverlay=, dtparam=).
+        if node.config_txt:
+            usercfg = extracted / "usercfg.txt"
+            body = "# Written by pi-bake — operator-declared HAT/peripheral overlays.\n"
+            body += "\n".join(node.config_txt) + "\n"
+            usercfg.write_text(body)
+            LOG.info("usercfg.txt: %d line(s) → FAT", len(node.config_txt))
+
         # 3. Pour the tree into the FAT32 image.
         LOG.info("mcopy: tarball → image")
         for child in sorted(extracted.iterdir()):
@@ -288,6 +299,20 @@ def _write_apkovl(
         0o644, False,
     ))
     members.append(("etc/timezone", f"{node.timezone}\n".encode(), 0o644, False))
+
+    # /etc/modules — kernel modules forced loaded at boot. Most
+    # modules autoload via udev or kernel builtins; this file is
+    # the override for hardware that needs an explicit modprobe
+    # before the runlevel using it comes up (e.g. mcp251x for the
+    # MCP2515 SPI CAN controller — autoload doesn't fire until
+    # the spi-bcm2835 master is up, which the dtoverlay enables,
+    # but explicitly listing it removes a race on slower boards).
+    if node.modules:
+        modules_body = (
+            "# Written by pi-bake — operator-declared kernel modules.\n"
+            + "\n".join(node.modules) + "\n"
+        )
+        members.append(("etc/modules", modules_body.encode(), 0o644, False))
 
     # sshd_config: enable, no passwords, root login by key.
     # Alpine's openssh is built WITHOUT PAM — `UsePAM yes` makes sshd

@@ -11,7 +11,7 @@ versions get assigned at tag time, not here.
 |  3 |  ✅   | [Pre-baked SSH host keys](#3-pre-baked-ssh-host-keys) |
 |  4 |  ✅   | [Bake-time apk-fetch (offline first boot)](#4-bake-time-apk-fetch-offline-first-boot) |
 |  5 |  ✅   | [pibakehub v1 frozen design + 8-fragment pilot](#5-pibakehub-v1-frozen-design--pilot) |
-|  6 |  🚧   | [HAT overlays + `/etc/modules` (FAT writes)](#6-hat-overlays--etcmodules-fat-writes) |
+|  6 |  ✅   | [HAT overlays + `/etc/modules` (FAT writes)](#6-hat-overlays--etcmodules-fat-writes) |
 |  7 |  🔴   | [`--pibakehub` wired into `pi-bake build`](#7---pibakehub-wired-into-pi-bake-build) |
 |  8 |  ⬜   | [Init-time install of bake-staged extras (signed APKINDEX)](#8-init-time-install-of-bake-staged-extras-signed-apkindex) |
 |  9 |  ⬜   | [Raspbian backend (`.img.xz`, losetup)](#9-raspbian-backend) |
@@ -160,9 +160,9 @@ The prototype is NOT wired into `pi-bake build` — that's #7.
 ---
 
 ## 6. HAT overlays + `/etc/modules` (FAT writes)
-**🚧 in flight (next up)**
+**✅ shipped**
 
-Add two new top-level Recipe fields:
+Two new top-level Recipe fields:
 
 ```yaml
 config_txt:                          # appended to /boot/usercfg.txt on FAT
@@ -173,19 +173,25 @@ modules:                             # written to /etc/modules in apkovl
   - can_dev
 ```
 
-Implementation is small (~half day) and self-contained — pi-bake
-already writes FAT-resident files via `mcopy`; this is one more.
-The "v0.3 HAT-overlay machinery" label in earlier drafts
-overstated it: no design blocker, just code to write.
+Stock Alpine RPi `config.txt` already ends with `include
+usercfg.txt`, so pi-bake creates that file fresh with the
+operator's lines + a generated header comment. The shipped
+`config.txt` is never touched.
 
-Merge strategy with the existing config.txt that ships in the
-tarball: pi-bake writes **`usercfg.txt`** (which the stock
-config.txt `include`s on RPi), so the bootloader picks up the
-edits without touching the stock file.
+`/etc/modules` lands in the apkovl, world-readable, in declared
+order — important for cards with load-order dependencies (e.g.
+spi-bcm2835 before mcp251x).
 
-Unblocks #7. Also lands `config_txt:` + `modules:` as first-class
-recipe fields so operators with HATs can use them directly
-without waiting for the pibakehub registry.
+CLI: `--config-txt LINE` (repeatable) + `--module NAME`
+(repeatable).
+
+See `examples/pi-5-can-rs485.yaml` for a working HAT recipe
+(Waveshare RS485 CAN HAT — SPI overlay + MCP2515 module + RS485
+UART).
+
+Unblocks #7. Lands as first-class Recipe fields so operators
+with HATs can use them directly without waiting for the pibakehub
+registry.
 
 ---
 

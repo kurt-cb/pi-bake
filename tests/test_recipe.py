@@ -246,6 +246,7 @@ def test_dump_canonical_form_idempotent(tmp_path):
     "pi-5-wired-dhcp.yaml",
     "pi-5-be200-edge.yaml",
     "pi-zero-w-armhf.yaml",
+    "pi-5-can-rs485.yaml",
 ])
 def test_shipped_example_parses(name):
     p = EXAMPLES / name
@@ -461,3 +462,80 @@ def test_apk_fetch_passes_to_build_kwargs():
     )
     _, kwargs = recipe_to_node_config(r)
     assert kwargs["apk_fetch"] is True
+
+
+# --------------------------------------------------------------------------- #
+# HAT overlays — config_txt + modules YAML fields                              #
+# --------------------------------------------------------------------------- #
+
+def test_config_txt_and_modules_default_empty(tmp_path):
+    r = _write_and_load(tmp_path, _minimal_yaml())
+    assert r.config_txt == []
+    assert r.modules == []
+
+
+def test_config_txt_yaml_loads_in_order(tmp_path):
+    body = _minimal_yaml() + """
+config_txt:
+  - dtparam=spi=on
+  - dtoverlay=mcp2515-can0,oscillator=12000000,interrupt=25,spimaxfrequency=2000000
+  - enable_uart=1
+"""
+    r = _write_and_load(tmp_path, body)
+    assert r.config_txt == [
+        "dtparam=spi=on",
+        "dtoverlay=mcp2515-can0,oscillator=12000000,interrupt=25,spimaxfrequency=2000000",
+        "enable_uart=1",
+    ]
+
+
+def test_modules_yaml_loads(tmp_path):
+    body = _minimal_yaml() + """
+modules:
+  - mcp251x
+  - can_dev
+"""
+    r = _write_and_load(tmp_path, body)
+    assert r.modules == ["mcp251x", "can_dev"]
+
+
+def test_config_txt_non_list_rejected(tmp_path):
+    body = _minimal_yaml() + 'config_txt: "dtparam=spi=on"\n'
+    with pytest.raises(ValueError, match="config_txt"):
+        _write_and_load(tmp_path, body)
+
+
+def test_modules_non_string_entry_rejected(tmp_path):
+    body = _minimal_yaml() + "modules:\n  - 42\n"
+    with pytest.raises(ValueError, match="modules"):
+        _write_and_load(tmp_path, body)
+
+
+def test_config_txt_and_modules_round_trip(tmp_path):
+    r1 = Recipe(
+        hostname="t", board="pi-5", os="alpine",
+        ssh_pubkey=_PUBKEY,
+        config_txt=[
+            "dtparam=pciex1",
+            "dtoverlay=mcp2515-can0,oscillator=12000000,interrupt=25",
+        ],
+        modules=["mcp251x", "can_dev"],
+        output=OutputSpec(path="/tmp/x.img.gz"),
+    )
+    p = tmp_path / "round.yaml"
+    p.write_text(dump_recipe(r1))
+    r2 = load_recipe(p)
+    assert r2 == r1
+
+
+def test_config_txt_and_modules_passed_to_nodeconfig():
+    r = Recipe(
+        hostname="t", board="pi-5", os="alpine",
+        ssh_pubkey=_PUBKEY,
+        config_txt=["dtparam=spi=on"],
+        modules=["mcp251x"],
+        output=OutputSpec(path="/tmp/x.img.gz"),
+    )
+    node, _ = recipe_to_node_config(r)
+    assert node.config_txt == ["dtparam=spi=on"]
+    assert node.modules == ["mcp251x"]
