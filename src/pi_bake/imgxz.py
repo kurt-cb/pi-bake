@@ -89,23 +89,48 @@ def _sudo(*args: str, capture: bool = True) -> subprocess.CompletedProcess:
 def decompress_xz(xz_path: Path, out_dir: Path) -> Path:
     """xz -d the input into out_dir; return the resulting .img path.
 
+    Content-sniff instead of extension-trust: the Raspberry Pi
+    downloads server publishes the latest Pi OS image at
+    `https://downloads.raspberrypi.com/raspios_lite_arm64_latest`
+    (a permanent redirect with NO `.xz` suffix on the path). The
+    fetcher names the cached file after the URL's last segment,
+    so the on-disk path can be `raspios_lite_arm64_latest` — a
+    valid xz file with no `.xz` extension. Rejecting based on
+    suffix means the latest-URL bakes never get past decompress.
+
+    Output filename: strip a trailing `.xz` if present; otherwise
+    append `.img` (so the result has a sensible extension downstream
+    code can recognize).
+
     Idempotent: if the decompressed file already exists in out_dir
-    with the same size as a fresh decompression would produce, reuse
-    it. (Decompressing a 4 GB image takes ~30 s; not worth redoing
-    when the input hasn't changed.)
+    it gets reused (decompressing a 4 GB image takes ~30 s; not
+    worth redoing on every bake).
     """
     _require_tools("xz")
     out_dir.mkdir(parents=True, exist_ok=True)
-    # Strip the trailing .xz from the input filename.
+
+    # Content sniff — xz file magic is FD 37 7A 58 5A 00. If the
+    # input isn't xz-compressed, fail loudly with a clear message
+    # instead of letting `xz -d` print its own (less helpful) error.
+    XZ_MAGIC = bytes((0xFD, 0x37, 0x7A, 0x58, 0x5A, 0x00))
+    with open(xz_path, "rb") as f:
+        head = f.read(len(XZ_MAGIC))
+    if head != XZ_MAGIC:
+        raise ValueError(
+            f"{xz_path} doesn't look like an xz file (magic was "
+            f"{head!r}, expected {XZ_MAGIC!r}). The Raspberry Pi / "
+            f"Debian / Fedora download URLs may have moved; check "
+            f"upstream + bump the catalog version."
+        )
+
+    # Output filename.
     stem = xz_path.name
-    if not stem.endswith(".xz"):
-        raise ValueError(f"expected .xz suffix on {xz_path}; got {stem!r}")
-    raw_path = out_dir / stem[:-3]
+    raw_path = out_dir / (stem[:-3] if stem.endswith(".xz") else stem + ".img")
     if raw_path.is_file():
         LOG.info("decompressed image cached: %s", raw_path)
         return raw_path
     LOG.info("xz -d %s → %s", xz_path.name, raw_path.name)
-    # -k keeps the input; -c writes to stdout so we control the output path.
+    # -c writes to stdout so we control the output path.
     with open(raw_path, "wb") as out:
         subprocess.run(
             ["xz", "-d", "-c", str(xz_path)],
