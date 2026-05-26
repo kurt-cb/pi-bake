@@ -8,8 +8,10 @@ network for boot-without-an-SD-card testing.
 
 The lab setup described here was used during pi-bake v0.3
 development to verify the Raspbian / Debian / Fedora backends
-on real Pi 5 hardware. Captured here as reference so the next
-lab build doesn't have to rediscover it.
+on real Pi 5 / CM4 hardware. **Major rewrite 2026-05-26** after
+the first end-to-end CM4 bring-up surfaced a long list of
+incorrect assumptions baked into the initial design. The
+current text reflects what actually works on real hardware.
 
 **Audience.** Whoever sets up a PXE bench to test pi-bake images.
 **Not** a how-to for operators consuming pi-bake images — they
@@ -17,59 +19,107 @@ just `dd` to SD and boot.
 
 ---
 
-## §1  How Pi PXE boot works
+## §1  How Pi PXE boot actually works
+
+The Pi 4 / CM4 / Pi 5 bootloader behaves quite differently from
+the Pi 3 here. Most pi-bake testing targets the Pi 4 generation,
+so the modern path is documented as primary.
+
+### §1.1  Pi 4 / CM4 / Pi 5 path (modern; pi-bake's primary target)
 
 ```
 power on
   ↓
-Pi bootloader EEPROM checks BOOT_ORDER
-  → finds "network" enabled (BOOT_ORDER nibble 2)
+Pi bootloader EEPROM (on-chip) starts. NO bootcode.bin fetch —
+the equivalent runs entirely from EEPROM. Checks BOOT_ORDER;
+when it hits the "network" nibble (2), continues:
   ↓
-DHCP DISCOVER broadcast on eth0
-   vendor class: "PXEClient:Arch:00011:Raspberry Pi Boot"
+DHCP DISCOVER on eth0, vendor class:
+   "PXEClient:Arch:00000:UNDI:002001"
+   (yes, Arch:00000 — despite being ARM, the Pi firmware uses
+    the legacy PC-BIOS arch code for PXE compat. Don't try to
+    match "Arch:00011" — that's iPXE / EFI clients, not the
+    Pi firmware.)
   ↓
 dnsmasq DHCP responds:
-   - IP lease (from configured range)
-   - option 66 (next-server)  = TFTP server IP
-   - option 67 (boot file)    = <mac>/bootcode.bin
+   - IP lease
+   - option 60 (vendor-class echo back) via pxe-service
+   - option 66 (next-server) = TFTP server IP
+   - option 67 (boot file) — IGNORED by Pi 4+ for prefix
+     resolution (see below) — but dnsmasq still has to send
+     SOMETHING valid here.
   ↓
-Pi TFTPs the boot file. The bootloader uses the DIRECTORY
-portion of the boot file path as a prefix for all subsequent
-fetches (start4.elf, fixup4.dat, config.txt, cmdline.txt,
-kernel8.img, *.dtb, overlays/*). So pointing option 67 at
-"<mac>/bootcode.bin" auto-isolates each Pi's file set under
-its own MAC-keyed subdir.
+Pi sends DHCPREQUEST + receives DHCPACK.
+
+Pi firmware then TFTPs files. **It does NOT use option-67's
+directory as the prefix.** Instead, it uses ITS OWN convention:
+   - try  <serial-hex>/<file>    first
+   - then <file>                 at TFTP root
+
+Where <serial-hex> is the Pi's 8-character hex serial number
+(e.g. "7614437e" for a CM4). The serial is on the SoC, baked at
+manufacture; visible in /proc/cpuinfo's "Serial" line or via
+`vcgencmd otp_dump | grep ^28:` on a booted Pi.
+
+Files the firmware fetches (in order, each at the same prefix):
+   start4.elf       (stage-2 firmware; mandatory)
+   fixup4.dat       (memory map fixup; mandatory)
+   config.txt       (boot config; mandatory)
+   cmdline.txt      (kernel command line; mandatory)
+   boot/vmlinuz-rpi (kernel — path from config.txt's `kernel=` line;
+                     Alpine puts kernel in boot/, Pi OS uses kernel8.img
+                     at root)
+   boot/initramfs-rpi  (initramfs — path from config.txt)
+   <board>.dtb      (device tree, e.g. bcm2711-rpi-cm4.dtb for CM4)
+   overlays/<*>.dtbo (overlays referenced from config.txt)
+
+It also probes for optional files (404s are normal, harmless):
+   usercfg.txt, pieeprom.sig, recover4.elf, recovery.elf,
+   bootcfg.txt, dt-blob.bin, armstub8-gic.bin
   ↓
-Kernel boots, runs cmdline.txt's "init=" or default systemd.
-Rootfs is whatever cmdline.txt's "root=" points at (NFS for
-diskless, /dev/mmcblk0p2 if booting SD, etc.).
+Kernel boots from RAM. cmdline.txt's `root=` determines rootfs:
+   - root=/dev/mmcblk0p2  → expects SD card present (defeats PXE)
+   - root=/dev/nfs        → NFS-mount via nfsroot= argument
+   - (anything else: kernel panic at mount root_fs)
 ```
 
-Key property: **the bootloader does not re-request a boot file
-per stage.** It fetches `<prefix>/bootcode.bin` once and uses
-the prefix for everything else. So per-MAC isolation only needs
-the option-67 trick — no extra config beyond that.
+### §1.2  Pi 3 path (legacy; if you're targeting old hardware)
+
+Pi 3 bootloader is in an SPI flash + reads `bootcode.bin` from
+the first boot source (SD or network). On PXE:
+- Fetches `bootcode.bin` via TFTP from option-67's path
+- THEN honors option-67's directory as the prefix for all subsequent
+  files
+
+So Pi 3 PXE actually works with MAC-keyed (or any) per-Pi
+prefixes via dnsmasq's `dhcp-boot=` line. Pi 4+ doesn't.
+
+**pi-bake's tooling targets Pi 4+ behavior.** Pi 3 PXE works as
+a side effect (the serial-keyed dir + a `dhcp-boot=` pointing
+at it would also work), but isn't a first-class target.
 
 ---
 
 ## §2  Minimal dnsmasq config
 
-Tested against dnsmasq 2.x on Fedora 41 + Debian 12 hosts.
+Tested against dnsmasq 2.92 on Fedora 41-44 hosts.
 Path: `/etc/dnsmasq.d/pi-bake-pxe.conf`.
 
 ```ini
 # /etc/dnsmasq.d/pi-bake-pxe.conf
-# Pi-bake PXE/TFTP lab — replaces ISP DHCP on the LAN
-# Host IP: 192.168.4.2 (this machine, hardcoded static)
+# Pi-bake PXE/TFTP lab — replaces ISP DHCP on the LAN.
+# Host IP: 192.168.4.2 (this machine, hardcoded static).
 #
-# Strict per-MAC PXE: only Pis we've explicitly registered get a
-# boot file. Unknown Pis still get an IP lease (so we can read
-# their MAC from the log + add a block below) but no boot file —
-# they'll PXE-timeout safely instead of grabbing some other Pi's
-# image.
+# Strict per-MAC IP pinning + Pi-PXE service offering. Unknown
+# Pis still get an IP lease (so we can read their serial from
+# TFTP attempts) but no boot file. They'll PXE-loop harmlessly
+# until added.
 
 # ─── Interface binding ───────────────────────────────────────────
-interface=eth0
+# Match this to the actual LAN interface (ip -br link). Old habit
+# of writing "eth0" silently breaks DHCP on modern Fedora hosts
+# where the iface is enp0s3 / eno1 / wlp2s0 / etc.
+interface=enp0s3
 bind-interfaces
 listen-address=127.0.0.1,192.168.4.2
 no-dhcp-interface=lo
@@ -98,58 +148,47 @@ enable-tftp
 tftp-root=/var/lib/tftpboot
 tftp-no-blocksize   # some Pi bootloaders dislike RFC 2348 blksize
 
-# ─── Pi PXE: tag identification only (no global boot file) ───────
-# Tag any client identifying as a Raspberry Pi bootloader so we
-# can see them in the log. Crucially: NO `dhcp-boot=tag:rpi-any`
-# line — unknown Pis get an IP lease and that's it. They'll PXE-
-# timeout safely without grabbing some other Pi's image.
-dhcp-vendorclass=set:rpi-any,PXEClient:Arch:00000:Raspberry Pi Boot
-dhcp-vendorclass=set:rpi-any,PXEClient:Arch:00011:Raspberry Pi Boot
+# ─── Pi PXE ──────────────────────────────────────────────────────
+# Match Pi clients by the start of the vendor class. The Pi
+# firmware sends "PXEClient:Arch:00000:UNDI:002001"; substring
+# match "PXEClient:Arch:00000" covers all Pi 4+ generations.
+# (Pi 3 bootcode.bin client may send a different string; add a
+# Arch:00011 match if you also want to catch iPXE / EFI loaders.)
+dhcp-vendorclass=set:rpi-any,PXEClient:Arch:00000
+dhcp-vendorclass=set:rpi-any,PXEClient:Arch:00011
 
-# Pi-vendor option (some bootloaders need this echoed back)
-dhcp-option-force=tag:rpi-any,vendor:PXEClient,6,2b
+# REQUIRED for Pi 4+ PXE. Without this directive the Pi
+# bootloader rejects the DHCPOFFER and re-DISCOVER-loops forever.
+# pxe-service makes dnsmasq behave as a "real" PXE server (echoes
+# back the vendor class + sends a PXE menu entry).
+# Arch 0 corresponds to "PXEClient:Arch:00000" (Pi firmware
+# uses the legacy PC-BIOS arch code).
+pxe-service=tag:rpi-any,0,"Raspberry Pi Boot"
 
-# ─── Per-Pi registered blocks ────────────────────────────────────
-# Each Pi we want to PXE-boot needs TWO lines:
-#   1. dhcp-host: MAC → static IP + hostname + per-Pi tag
-#   2. dhcp-boot: per-Pi tag → MAC-dashed boot file path
+# ─── Per-Pi pinning (one block per Pi) ───────────────────────────
+# Pi 4+ DOES NOT use the option-67 path prefix — the bootloader
+# resolves TFTP paths by SERIAL NUMBER, not MAC. dnsmasq's job
+# is just IP pinning + hostname. The dhcp-boot= line is NOT
+# needed for Pi 4+ (kept for documentation only; harmless).
 #
-# The TFTP path uses the same MAC formatted with DASHES (filesystem-
-# friendlier than colons). The Pi bootloader uses the directory
-# component of the boot file as the prefix for ALL subsequent
-# fetches (start4.elf, fixup4.dat, kernel8.img, *.dtb, overlays/*)
-# — so we only need to point at <mac>/bootcode.bin and the rest
-# is automatic.
+# Discover a Pi's serial from the dnsmasq.log TFTP attempts the
+# first time it powers on (see §6).
 #
-# Add one pair of lines per Pi. Find the MAC from log-dhcp output
-# the first time a new Pi attempts to PXE-boot.
-
-# Pi #1 — pi-test-raspbian
-# dhcp-host=aa:bb:cc:dd:ee:ff,set:pi1,192.168.4.51,pi-test-raspbian,1h
-# dhcp-boot=tag:pi1,aa-bb-cc-dd-ee-ff/bootcode.bin
-
-# Pi #2 — pi-test-debian
-# dhcp-host=11:22:33:44:55:66,set:pi2,192.168.4.52,pi-test-debian,1h
-# dhcp-boot=tag:pi2,11-22-33-44-55-66/bootcode.bin
-
-# Pi #3 — pi-test-fedora
-# dhcp-host=99:88:77:66:55:44,set:pi3,192.168.4.53,pi-test-fedora,1h
-# dhcp-boot=tag:pi3,99-88-77-66-55-44/bootcode.bin
+# Example: CM4 with MAC 88:a2:9e:44:31:f3 and serial 7614437e
+# dhcp-host=88:a2:9e:44:31:f3,set:cm4-1,192.168.4.51,pxe-test-cm4,1h
+# # The dhcp-boot below is REQUIRED for Pi 3 (which honors option 67),
+# # IGNORED by Pi 4/CM4/Pi 5 (which uses <serial>/<file> prefix).
+# dhcp-boot=tag:cm4-1,7614437e/start4.elf
 ```
 
-### Kill the ISP DHCP first
+### §2.1  Kill the ISP DHCP first
 
-`dhcp-authoritative` means dnsmasq will respond aggressively. If
-the ISP router is still serving DHCP, you'll get a race. Either:
+`dhcp-authoritative` makes dnsmasq respond aggressively. If the
+ISP router is still serving DHCP, you'll get a race. Disable it
+in the router admin OR move the Pi + this host onto an isolated
+switch.
 
-- Disable DHCP in the router's admin (most consumer routers have
-  a toggle).
-- Or move the Pi + this host onto an isolated switch.
-
-Otherwise the Pi may get an IP from the wrong server and
-silently fail PXE (the wrong server doesn't set option 67).
-
-### Starting
+### §2.2  Starting
 
 ```bash
 sudo systemctl enable --now dnsmasq
@@ -157,92 +196,127 @@ sudo journalctl -u dnsmasq -f
 # OR: sudo tail -f /var/log/dnsmasq.log
 ```
 
----
+### §2.3  Firewall (Fedora)
 
-## §3  TFTP tree layout
-
-```
-/var/lib/tftpboot/
-├── aa-bb-cc-dd-ee-ff/                ← Pi #1 (MAC dashed, lowercase)
-│   ├── bootcode.bin
-│   ├── start4.elf  start.elf  start4cd.elf
-│   ├── fixup4.dat  fixup.dat
-│   ├── config.txt
-│   ├── cmdline.txt
-│   ├── kernel8.img
-│   ├── bcm2712-rpi-5-b.dtb           ← Pi 5
-│   ├── bcm2711-rpi-4-b.dtb           ← Pi 4
-│   └── overlays/
-│       └── *.dtbo
-├── 11-22-33-44-55-66/                ← Pi #2 (different image set)
-│   └── …
-└── 99-88-77-66-55-44/                ← Pi #3
-    └── …
-```
-
-Each Pi sees only its own subtree. The Pi bootloader prefixes
-every TFTP fetch with the directory portion of the option-67 boot
-file path, so total isolation comes for free once the option-67
-path includes the MAC dir.
-
-### Populating from a baked image
-
-Use the helper script at `tools/img-to-tftp.sh` (in the pi-bake
-repo):
+Default Fedora `FedoraWorkstation` zone blocks DHCP server (only
+allows `dhcpv6-client`). Add `dhcp` + `tftp` services to the
+zone the LAN interface is in:
 
 ```bash
-# Bake an image first
-pi-bake build --board pi-5 --os raspbian \
-    --hostname pi-test-1 \
-    --ssh-pubkey ~/.ssh/k.pub \
-    --out /tmp/pi-test-1.img.xz
+ZONE=$(sudo firewall-cmd --get-zone-of-interface=enp0s3)
+sudo firewall-cmd --zone=$ZONE --add-service=dhcp --add-service=tftp --permanent
+sudo firewall-cmd --reload
+```
 
-# Extract its boot partition into the MAC-keyed TFTP dir
-sudo tools/img-to-tftp.sh aa:bb:cc:dd:ee:ff /tmp/pi-test-1.img.xz
+Without this, tcpdump sees the Pi's DHCPDISCOVER on the wire
+but dnsmasq logs nothing — firewalld drops the broadcast before
+dnsmasq's socket sees it.
+
+### §2.4  TFTP directory permissions
+
+The TFTP daemon (running as the `dnsmasq` user) needs `o+x` on
+`/var/lib/tftpboot` to traverse it:
+
+```bash
+sudo chmod o+x /var/lib/tftpboot       # mode -> 0755 or 0775
+ls -ld /var/lib/tftpboot/              # confirm trailing "r-x" not "r--"
+```
+
+Without this, dnsmasq logs `failed sending ...` or `cannot access`
+messages (the wording is misleading — looks like a network failure
+but is actually a permission denial on the directory traversal).
+
+---
+
+## §3  TFTP tree layout (serial-keyed)
+
+```
+/var/lib/tftpboot/                          ← TFTP root
+└── <pi-serial-hex>/                        ← per-Pi subdir (8 hex chars)
+    ├── start4.elf  start.elf  start4cd.elf
+    ├── fixup4.dat  fixup.dat
+    ├── config.txt
+    ├── cmdline.txt
+    ├── boot/                               ← Alpine kernel layout
+    │   ├── vmlinuz-rpi
+    │   ├── initramfs-rpi
+    │   └── modloop-rpi
+    ├── kernel8.img                         ← Pi OS / Debian kernel layout
+    ├── bcm2711-rpi-cm4.dtb                 ← Pi 4 / CM4
+    ├── bcm2712-rpi-5-b.dtb                 ← Pi 5
+    └── overlays/
+        └── *.dtbo
+```
+
+The Pi bootloader prefixes every TFTP fetch with
+`<serial>/`, so total isolation between Pis on the same TFTP
+server comes for free — no shared content under TFTP root.
+
+### §3.1  Pi serial number — where to find it
+
+- **From dnsmasq.log** (preferred; works for unknown new Pis):
+  Power-cycle the Pi with no per-Pi subdir populated. dnsmasq
+  will log `cannot access /var/lib/tftpboot/<SERIAL>/start4.elf`
+  (or `file ... not found`). The `<SERIAL>` is the Pi's
+  8-character hex serial.
+- **From a Pi-booted Pi:** `vcgencmd otp_dump | awk -F: '/^28:/{print $2}'`
+  (value is hex serial, 8 chars after leading zeros).
+- **From `/proc/cpuinfo`:** `cat /proc/cpuinfo | grep ^Serial`
+  (note: the cpuinfo serial is 16 hex chars but only the LAST 8
+  are what the PXE bootloader uses).
+
+### §3.2  Populating from a baked image
+
+Use `tools/img-to-tftp.sh`:
+
+```bash
+# After baking an image:
+pi-bake build --config recipe.yaml
+# Extract its boot partition into the Pi's serial-keyed TFTP dir:
+sudo tools/img-to-tftp.sh 7614437e ~/sdcards/pxe-test-cm4.img.gz
 ```
 
 The script handles `.img.gz` (Alpine), `.img.xz` (Raspbian /
 Debian / Fedora), and raw `.img`. For partitioned images it
-losetup-mounts the boot partition and rsyncs the contents; for
-Alpine's single-FAT it `mcopy`s everything.
+losetup-mounts the boot partition and rsyncs; for Alpine's
+single-FAT image it `mcopy`s everything.
 
 ---
 
-## §4  Pi 5 EEPROM setup (one-time, before PXE works)
+## §4  Pi 5 EEPROM setup
 
-Pi 5 EEPROM defaults to SD-first. Enable network boot:
+Pi 5 EEPROM defaults to SD-first. Most CM4s already have
+network in BOOT_ORDER by default (verified empirically on
+CM4Lite + Waveshare CM4-to-Pi4 adapter, 2026-05). To verify
+or change:
 
 ```bash
-# On a Pi 5 booted from SD with Pi OS or Alpine:
+# On a Pi booted from SD with Pi OS:
 sudo rpi-eeprom-config --edit
 # Set or add:
-BOOT_ORDER=0xf241
+BOOT_ORDER=0xf142
 # Save + reboot.
 ```
 
 `BOOT_ORDER` nibbles (read right-to-left, first attempted first):
 
 ```
-0xf  2  4  1
- │   │  │  └─ try 1 = SD card
+0xf  1  4  2
+ │   │  │  └─ try 2 = network (PXE)
  │   │  └──── try 4 = USB-MSD
- │   └─────── try 2 = network (PXE)
+ │   └─────── try 1 = SD card
  └────────── restart from the right
 ```
 
-So `0xf241` means: SD → USB → network → restart. To make PXE
-the **first** attempt, swap: `0xf142` (network → SD → USB →
-restart). Both work; first-attempt-PXE is slower at boot when
-no PXE server is reachable but cleaner for the lab.
+For PXE-first: `0xf142` (network → SD → USB → loop). Or
+network-only (no SD fallback): `0xf2`.
 
-EEPROM is sticky — once set, every cold boot of that Pi tries
-in that order forever.
-
-### Pi 4
-
-`BOOT_ORDER` works the same on Pi 4 (latest EEPROM). Older Pi 4
-firmware may not honor network boot reliably; update via
-`sudo rpi-eeprom-update -a` first.
+**Alpine does NOT ship `rpi-eeprom`** (no package in main /
+community as of Alpine 3.21). If you're running Alpine on the
+Pi and need to change BOOT_ORDER, the path is: flash Raspbian
+once (it has `rpi-eeprom-config` baseline), edit + reboot —
+the EEPROM update sticks. Then flash back to whatever you
+wanted.
 
 ---
 
@@ -252,122 +326,113 @@ For CM4-based bench Pis using the [Waveshare CM4-to-Pi4
 adapter](https://www.waveshare.com/product/raspberry-pi/boards-kits/compute-module-4-4s-cat/cm4-to-pi4-adapter.htm),
 the workflow is simpler than rpiboot. The adapter provides a
 microSD slot + Pi 4 form factor for the CM4, so most of the
-Pi 4 / Pi 5 PXE story applies directly.
+Pi 4 PXE story applies directly.
 
-### Bench setup variants
+### §5.1  CM4 boot priorities
 
-**CM4Lite (no eMMC):** Boots from SD card directly. No eMMC
-boot order to worry about. Flash a pi-bake'd `.img.xz` to the
-SD card; the CM4 boots from it on power-up. PXE is governed by
-the SD card's `config.txt` + the bootloader EEPROM (same as
-Pi 4).
+- **CM4Lite (no eMMC):** boots from SD card OR network (via
+  PXE) directly. No jumpers to set.
+- **CM4 with eMMC:** if the eMMC contains a valid bootloader,
+  it takes priority. The Waveshare adapter has an `nRPIBOOT` /
+  `EMMC-DISABLE` jumper near the USB-OTG port — set to DISABLED
+  to force SD/PXE-only boot.
 
-**CM4 with eMMC:** eMMC normally has the boot priority. The
-Waveshare adapter exposes a "disable eMMC" jumper — when set,
-the CM4 ignores eMMC and falls through to the SD card slot. For
-the bench, leave that jumper in "disable eMMC" so the bench SD
-card always wins. (If you want eMMC-stored boot config to be
-the source of truth — production deployment, not bench — leave
-the jumper in "enable eMMC" and flash the EEPROM config via
-rpiboot + the standard CM4 setup process.)
+### §5.2  CM4 default BOOT_ORDER
 
-The Waveshare adapter's eMMC-disable jumper is labelled "EMMC"
-on the silkscreen, near the USB-OTG port. Default position is
-ENABLED (eMMC takes priority); flip to DISABLED for bench PXE
-work.
+Most CM4s (verified 2026-05) ship with network in BOOT_ORDER
+out of the box — so PXE Just Works without an EEPROM edit. If
+PXE isn't reaching dnsmasq.log on a fresh CM4, the EEPROM might
+be the older `0x1` or `0xf41` (no network); see §4 for the
+update path.
 
-### PXE flow on CM4 with Waveshare adapter
+### §5.3  CM4 wireless / Bluetooth
 
-1. Flash a pi-bake'd `.img.xz` to a microSD card.
-2. Insert the microSD into the Waveshare adapter's slot.
-3. Set the eMMC-disable jumper to DISABLED (if CM4 has eMMC).
-4. Power on.
-5. CM4 bootloader reads `/config.txt` from SD card.
-6. If `config.txt` doesn't have `program_usb_boot_mode=1` set
-   AND the EEPROM has network boot enabled (BOOT_ORDER), PXE
-   kicks in.
+Built-in BCM43455 WiFi/BT (same chip as Pi 4). Use
+`linux-firmware-brcm` in `packages:` for Alpine; ships in
+Raspbian/Debian/Fedora rootfs by default.
 
-### CM4 wireless / Bluetooth caveat
+### §5.4  PCIe
 
-The CM4 + Waveshare adapter exposes the CM4's onboard BCM43455
-WiFi/BT. Same chip as Pi 4. Use `linux-firmware-brcm` in
-`packages:` for Alpine bakes. For Raspbian/Debian/Fedora the
-firmware ships in their default rootfs already.
-
-### PCIe on the Waveshare adapter
-
-The adapter does NOT expose CM4's PCIe lane (it's a Pi 4 form-
-factor passthrough, no PCIe HAT slot). If you need PCIe HATs
-(e.g. M.2 + BE200 setup), use a different carrier such as the
-official CM4 IO board or a HAT-equipped carrier.
+The Waveshare CM4-to-Pi4 adapter does NOT expose CM4's PCIe lane
+(it's a Pi 4 form-factor passthrough, no HAT slot). For PCIe
+HATs (e.g. BE200 in M.2), use a different carrier such as the
+official CM4 IO board.
 
 ---
 
-## §6  Discovery workflow for unknown Pi MACs
+## §6  Discovery workflow for an unknown Pi
 
-A new Pi powered on for the first time has no entry in the
-dnsmasq config — its DHCP request gets logged but no boot file
-is served. Use the log to read the MAC, then add a block.
+The first time a new Pi powers on, you don't know its serial or
+MAC. Two-step discovery from the dnsmasq log:
 
 ```bash
-# Watch the log:
 sudo tail -f /var/log/dnsmasq.log
+```
 
-# Power on the new Pi. Watch for:
-#   dnsmasq-dhcp[1234]: DHCPDISCOVER(eth0) aa:bb:cc:dd:ee:ff
-#   dnsmasq-dhcp[1234]:    vendor class: PXEClient:Arch:00011:Raspberry Pi Boot
-#   dnsmasq-dhcp[1234]:    tags: rpi-any
-#   dnsmasq-dhcp[1234]: DHCPOFFER(eth0) 192.168.4.50 aa:bb:cc:dd:ee:ff
-#   (Pi retries a few times, then gives up — no boot file offered)
-#
-# Copy the MAC. Then add to /etc/dnsmasq.d/pi-bake-pxe.conf:
-#   dhcp-host=aa:bb:cc:dd:ee:ff,set:pi-new,192.168.4.51,pi-new,1h
-#   dhcp-boot=tag:pi-new,aa-bb-cc-dd-ee-ff/bootcode.bin
-#
-# Populate the TFTP dir:
-#   sudo tools/img-to-tftp.sh aa:bb:cc:dd:ee:ff /tmp/pi-new.img.xz
-#
-# Reload + power-cycle the Pi:
+Power on the Pi. Watch for two pieces of info:
+
+1. **MAC** (from DHCPDISCOVER):
+   ```
+   dnsmasq-dhcp[…]: DHCPDISCOVER(enp0s3) 88:a2:9e:44:31:f3
+   dnsmasq-dhcp[…]:    vendor class: PXEClient:Arch:00000:UNDI:002001
+   ```
+2. **Serial** (from TFTP attempts, after DHCPACK):
+   ```
+   dnsmasq-tftp[…]: file /var/lib/tftpboot/7614437e/start4.elf not found
+   ```
+
+With both, you can:
+
+```bash
+# 1. Populate the serial-keyed TFTP dir from a baked image:
+sudo tools/img-to-tftp.sh 7614437e ~/sdcards/<host>.img.gz
+
+# 2. (Optional) Pin the Pi's IP via dnsmasq:
+sudo tee -a /etc/dnsmasq.d/pi-bake-pxe.conf <<EOF
+
+# Pi #X (CM4, serial 7614437e)
+dhcp-host=88:a2:9e:44:31:f3,set:pi-X,192.168.4.51,pi-X,1h
+EOF
 sudo systemctl reload dnsmasq
+
+# 3. Power-cycle the Pi. Should boot the served image.
 ```
 
 ---
 
 ## §7  End-to-end test flow
 
-Given a fresh bench (dnsmasq running, ISP DHCP off):
+Given a fresh bench (dnsmasq running, ISP DHCP off, firewall
+allows dhcp + tftp, /var/lib/tftpboot has o+x):
 
 ```bash
 # 1. Bake an image
 pi-bake build \
-    --board pi-5 --os raspbian \
+    --board pi-4 --os alpine \
     --hostname pi-test-1 \
     --ssh-pubkey ~/.ssh/k.pub \
-    --out /tmp/pi-test-1.img.xz
+    --out /tmp/pi-test-1.img.gz
 
-# 2. Power on the Pi for the first time to discover its MAC
+# 2. Power on the Pi to discover its MAC + serial
 sudo tail -f /var/log/dnsmasq.log
-# (note the MAC, e.g. aa:bb:cc:dd:ee:ff, then Ctrl-C the tail)
+# (note MAC + serial — see §6, then Ctrl-C)
 
-# 3. Add per-Pi config block to dnsmasq + reload
+# 3. Add per-Pi IP pin to dnsmasq + reload
 sudo $EDITOR /etc/dnsmasq.d/pi-bake-pxe.conf
-# add:
-#   dhcp-host=aa:bb:cc:dd:ee:ff,set:pi-test-1,192.168.4.51,pi-test-1,1h
-#   dhcp-boot=tag:pi-test-1,aa-bb-cc-dd-ee-ff/bootcode.bin
 sudo systemctl reload dnsmasq
 
-# 4. Populate the MAC-keyed TFTP dir from the baked image
-sudo tools/img-to-tftp.sh aa:bb:cc:dd:ee:ff /tmp/pi-test-1.img.xz
+# 4. Populate the serial-keyed TFTP dir
+sudo tools/img-to-tftp.sh <SERIAL> /tmp/pi-test-1.img.gz
 
 # 5. Power-cycle the Pi
-# (watch dnsmasq.log — should see DHCPACK with boot file, then
-#  TFTP fetches of bootcode.bin → start4.elf → kernel → DTB)
-
-# 6. Wait ~30s for boot. SSH in.
-ssh root@192.168.4.51        # Debian / Alpine
-ssh pi@192.168.4.51          # Raspbian
-ssh fedora@192.168.4.51      # Fedora
+# (watch dnsmasq.log — should see DHCP cycle complete + TFTP
+#  fetches of start4.elf, fixup4.dat, config.txt, cmdline.txt,
+#  kernel, dtb, etc.)
 ```
+
+Note: **The Pi will get the kernel via PXE, but Alpine needs
+a rootfs source.** Without SD card AND without NFS/HTTP-served
+apkovl, kernel boots to a console-only busybox shell. See §11.
 
 ---
 
@@ -375,15 +440,17 @@ ssh fedora@192.168.4.51      # Fedora
 
 | Symptom | Likely cause | Fix |
 |---------|--------------|-----|
-| Pi DHCPs but no TFTP fetches | option 67 not delivered | Check `dhcp-boot=tag:…` line; ensure the per-Pi tag set in `dhcp-host` matches the tag in `dhcp-boot` |
-| TFTP fetches start but fail at `start4.elf` | Bootloader prefix isn't honoring option-67's directory | Verify the boot file path in option 67 is `<mac-dashed>/bootcode.bin` (with the directory component, not just `bootcode.bin`) |
-| `dhcpcd` on the Pi fails with APIPA | Race with ISP DHCP server | Confirm ISP router DHCP is OFF; check `sudo tail -f /var/log/dnsmasq.log` shows DHCPACK |
-| Pi boots fine but can't SSH in | Pi got a different IP than expected | Check the `dhcp-host` IP matches what the Pi is using; force a fresh lease via power-cycle |
-| Unknown DHCP request from non-Pi devices | Lab LAN has other clients | Acceptable — dnsmasq will lease them from the range; only Pis tagged `rpi-any` get the PXE-specific options |
-| `tftp-no-blocksize` warning at dnsmasq startup | Old dnsmasq version | Upgrade dnsmasq, or remove that line (its absence is harmless on most Pi bootloaders) |
-| `losetup` errors in `tools/img-to-tftp.sh` | LXC container doesn't have CAP_SYS_ADMIN | Run the script on the host, or grant the LXC the right capability |
-| `interface=eth0` in conf, dnsmasq starts fine but `ss -ulnp` shows no `:67` listener | dnsmasq's `bind-interfaces` requires the named interface to exist; if the actual LAN NIC is `enp0s3` / `eno1` / etc., DHCP is silently skipped | `ip -br link` to find the real LAN iface name; set `interface=<actual>` in the conf; `systemctl restart dnsmasq`; confirm `ss -ulnp` now lists `:67` |
-| tcpdump sees Pi's DHCPDISCOVER on `enp0s3` but dnsmasq logs nothing (even with `log-dhcp`); `ss -ulnp` confirms dnsmasq IS bound to UDP 67 on the right iface | **Firewalld** is dropping the broadcast before it reaches dnsmasq. Default Fedora `FedoraWorkstation` zone allows `dhcpv6-client` (host AS DHCP client) but NOT `dhcp` (host AS DHCP server). Same for the trailing `iifname "enp0s3" reject` catch-all rule. | `sudo firewall-cmd --zone=<zone> --add-service=dhcp --permanent` (also `--add-service=tftp` if not already), then `sudo firewall-cmd --reload`. Verify: `sudo firewall-cmd --info-zone=<zone> \| grep services` shows `dhcp`. Verified on Fedora Workstation 41–43. |
+| dnsmasq starts fine but `ss -ulnp` shows no `:67` for the pi-bake dnsmasq PID | `interface=` in conf names a NIC that doesn't exist on this host (e.g. `eth0` vs actual `enp0s3`); `bind-interfaces` silently drops DHCP serving | `ip -br link` to find the real LAN iface name; set `interface=<actual>` in conf; restart dnsmasq; confirm `ss -ulnp` now lists `:67` |
+| tcpdump sees Pi's DHCPDISCOVER on the wire but dnsmasq logs nothing (even with `log-dhcp`) | Firewalld is dropping the broadcast pre-dnsmasq. Fedora default `FedoraWorkstation` zone allows `dhcpv6-client` (client) but NOT `dhcp` (server) | `sudo firewall-cmd --zone=<zone> --add-service=dhcp --permanent` (also `tftp` if not already), then `sudo firewall-cmd --reload`. Verify: `firewall-cmd --info-zone=<zone> \| grep services` shows `dhcp` |
+| Pi sends DHCPDISCOVER → dnsmasq sends DHCPOFFER → Pi never DHCPREQUESTs, just re-DISCOVERS with same XID | Missing `pxe-service` directive in dnsmasq conf. Pi 4+ bootloader rejects offers that don't include a PXE service declaration | Add `pxe-service=tag:rpi-any,0,"Raspberry Pi Boot"` to conf, restart dnsmasq |
+| Pi's `tags:` in dnsmasq.log don't include `rpi-any` even though it's clearly a Pi (vendor class shows PXEClient) | `dhcp-vendorclass` substring match is too restrictive. Pi sends `PXEClient:Arch:00000:UNDI:002001`; matching against `:Raspberry Pi Boot` fails | Loosen the match to a stable prefix: `dhcp-vendorclass=set:rpi-any,PXEClient:Arch:00000` |
+| TFTP fetches go to wrong paths: `/var/lib/tftpboot/<file>` and `/var/lib/tftpboot/<SERIAL>/<file>`, not the MAC-keyed path you set in dhcp-boot | **Pi 4 / CM4 / Pi 5 bootloader ignores option-67's directory prefix.** Uses its own convention: `<serial-hex>/<file>` then fallback to `<file>` at root | Populate `/var/lib/tftpboot/<SERIAL>/` instead of `/var/lib/tftpboot/<MAC-dashed>/`. Use `tools/img-to-tftp.sh <SERIAL> <image>` (script takes serial, not MAC, as of 2026-05) |
+| dnsmasq logs `failed sending /var/lib/tftpboot/<serial>/start4.elf` or `cannot access ...` for files that DO exist | Permission denied on directory traversal — TFTP daemon (running as `dnsmasq` user) lacks `o+x` on `/var/lib/tftpboot`. Wording in dnsmasq is misleading ("failed sending" looks like network) | `sudo chmod o+x /var/lib/tftpboot` (mode → 0755 or 0775). Verify trailing `r-x` not `r--` in `ls -ld /var/lib/tftpboot/` |
+| Optional file 404s for `usercfg.txt`, `pieeprom.sig`, `recover4.elf`, `recovery.elf`, `bootcfg.txt`, `dt-blob.bin`, `armstub8-gic.bin` | Pi firmware probes for these; absence is normal for a stock pi-bake image | None — ignore the 404s. Real failure is if `start4.elf`, `fixup4.dat`, `config.txt`, `cmdline.txt`, kernel, or DTB 404s |
+| `failed sending /var/lib/tftpboot/<serial>/<file>` followed shortly by `sent ...` for the same file | TFTP is UDP; firmware retransmit handles transient packet loss/timing | None — log noise, not a failure |
+| `dhcpcd` on the Pi fails with APIPA after PXE boot | Race with ISP DHCP server (still active) | Confirm ISP router DHCP is OFF; check dnsmasq.log shows DHCPACK |
+| Pi boots fine but can't SSH in | Pi got a different IP than pinned (probably a stale lease) | Force fresh lease on Pi side OR confirm `dhcp-host` MAC matches what Pi actually sends; `sudo systemctl restart dnsmasq` (not `reload`) is sometimes required for new dhcp-host entries to take effect for already-leased clients |
+| `losetup` errors in `tools/img-to-tftp.sh` from inside an LXC container | Container lacks CAP_SYS_ADMIN OR doesn't have loop devices passed through. Loop control is a GLOBAL kernel resource, not namespaceable | Run on the host, OR use a privileged container with `/dev/loop-control` device passthrough |
 
 ---
 
@@ -391,16 +458,15 @@ ssh fedora@192.168.4.51      # Fedora
 
 This dnsmasq setup is bench-test infrastructure. It replaces the
 LAN's existing DHCP for the duration of a PXE test pass, then
-gets shut down. **Do not bake operator/customer deployment
-config into this setup** — production DHCP/DNS belongs in a
-downstream tool (whatever DNS/DHCP appliance the operator
-actually ships), not in pi-bake's design dir.
+gets shut down. Production DHCP/DNS belongs in a downstream tool
+(whatever DNS/DHCP appliance the operator actually ships), not
+in pi-bake's design dir.
 
-If a downstream project (totaldns or any other) wants to
-integrate PXE serving into its own DHCP/DNS appliance, the
-mechanics here (vendor-class tagging, MAC-keyed boot file
-paths, TFTP-tree layout) transfer cleanly — but the integration
-work happens IN the downstream project, not in pi-bake.
+If a downstream project wants to integrate PXE serving into its
+own DHCP/DNS appliance, the mechanics here (vendor-class tagging,
+serial-keyed TFTP-tree layout, pxe-service directive, firewalld
+service entries) transfer cleanly — but the integration work
+happens IN the downstream project, not in pi-bake.
 
 ---
 
@@ -408,9 +474,32 @@ work happens IN the downstream project, not in pi-bake.
 
 - Raspberry Pi network boot:
   https://www.raspberrypi.com/documentation/computers/raspberry-pi.html#network-boot
-- Pi 4 bootloader source (option 67 prefix behavior):
+- Pi 4 bootloader source (TFTP prefix behavior):
   https://github.com/raspberrypi/rpi-eeprom
-- dnsmasq man page: `man 8 dnsmasq` (look for `dhcp-host`,
-  `dhcp-boot`, `dhcp-vendorclass`, `enable-tftp`)
+- dnsmasq man page: `man 8 dnsmasq` — keywords `dhcp-host`,
+  `dhcp-boot`, `dhcp-vendorclass`, `pxe-service`, `enable-tftp`
 - Waveshare CM4-to-Pi4 adapter:
   https://www.waveshare.com/product/raspberry-pi/boards-kits/compute-module-4-4s-cat/cm4-to-pi4-adapter.htm
+
+---
+
+## §11  Rootfs delivery (what's MISSING from this doc)
+
+PXE-boot of the kernel is now verified end-to-end. To get a
+USABLE Pi (not just a kernel that boots to console), you need
+the rootfs delivered somehow:
+
+| OS | SD card present | NFS-rootfs | Alpine apkovl over HTTP |
+|----|----------------|------------|-------------------------|
+| Alpine | ✓ works (PXE kernel + SD apkovl) | not natively supported | requires pi-bake feature work |
+| Raspbian | ✓ works (hybrid) | ✓ standard pattern | n/a |
+| Debian | ✓ works (hybrid) | ✓ standard pattern | n/a |
+| Fedora | ✓ works (hybrid) | ✓ standard pattern | n/a |
+
+**Not yet documented:**
+
+- NFS-rootfs setup on the dnsmasq host (`nfs-utils` install, `/etc/exports` config, firewall services)
+- `tools/img-to-nfs.sh` (sibling to `tools/img-to-tftp.sh`) for extracting the rootfs partition of an `.img.xz` into the NFS export dir
+- Pi-bake feature for PXE-friendly Alpine bakes (apkovl over HTTP, repositories pointing at HTTP)
+
+These are next-session work, captured here so the gap is explicit.

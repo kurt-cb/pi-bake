@@ -1,28 +1,42 @@
 #!/usr/bin/env bash
 # img-to-tftp.sh — extract a pi-bake'd image's boot files into
-# a MAC-keyed TFTP dir for PXE serving.
+# a serial-keyed TFTP dir for Pi PXE serving.
 #
 # Usage:
-#   sudo tools/img-to-tftp.sh <MAC> <image-file> [tftp-root]
+#   sudo tools/img-to-tftp.sh <SERIAL> <image-file> [tftp-root]
 #
 # Examples:
-#   sudo tools/img-to-tftp.sh aa:bb:cc:dd:ee:ff /tmp/pi-test-1.img.xz
-#   sudo tools/img-to-tftp.sh aa:bb:cc:dd:ee:ff /tmp/td-pi5-1.img.gz /srv/tftp
+#   sudo tools/img-to-tftp.sh 7614437e /tmp/pi-test-1.img.xz
+#   sudo tools/img-to-tftp.sh 7614437e /tmp/td-pi5-1.img.gz /srv/tftp
 #
 # What it does:
 #   1. Decompress (.img.gz | .img.xz | .img all handled).
 #   2. Detect partitioned (Raspbian/Debian/Fedora) vs single-FAT
 #      (Alpine RPi tarball-bake) and extract the boot partition.
-#   3. Copy the boot file set into <tftp-root>/<mac-dashed>/
-#      where <mac-dashed> is the MAC with colons replaced by
-#      dashes, lowercase (filesystem-friendlier than colons).
+#   3. Copy the boot file set into <tftp-root>/<serial>/
+#      where <serial> is the Pi's 8-hex-char serial number
+#      (e.g. 7614437e — verified via dnsmasq.log TFTP attempts
+#      OR `vcgencmd otp_dump | grep ^28:` on a booted Pi).
 #
-# The Pi bootloader uses the directory portion of the option-67
-# boot file path as a prefix for all subsequent TFTP fetches
-# (start4.elf, fixup4.dat, kernel8.img, *.dtb, overlays/*). So
-# the bootcode.bin lives at <tftp-root>/<mac-dashed>/bootcode.bin
-# and the dnsmasq `dhcp-boot=tag:<pi>,<mac-dashed>/bootcode.bin`
-# line steers the bootloader to that subtree.
+# Why serial-keyed, not MAC-keyed (LESSON LEARNED — see
+# design/infra_pxe.md):
+#   Pi 4 / CM4 / Pi 5 bootloader IGNORES option-67's directory
+#   prefix and uses its OWN convention: tries `<serial>/<file>`
+#   first, then falls back to `<file>` at TFTP root. The MAC
+#   you set in dnsmasq's `dhcp-boot=` is irrelevant for Pi 4+.
+#   Serial-number is what the bootloader actually looks for.
+#
+#   Pi 3's bootloader DOES honor option 67, so MAC-keyed would
+#   work there — but for Pi 4+ uniformity, this script targets
+#   serial-keyed always.
+#
+# How to discover a Pi's serial:
+#   1. Power on the Pi with no per-Pi TFTP dir populated.
+#   2. dnsmasq.log will show TFTP fetch attempts like:
+#        file /var/lib/tftpboot/7614437e/start4.elf not found
+#      → the `7614437e` is the Pi's serial.
+#   3. Or, on a booted Pi-OS Pi: `vcgencmd otp_dump | grep ^28:`
+#      (the value after `:` is the serial in hex).
 #
 # See design/infra_pxe.md for the full PXE lab setup.
 
@@ -35,15 +49,20 @@ usage() {
 
 [[ $# -ge 2 ]] || usage
 
-MAC="$1"
+SERIAL="$1"
 IMG="$2"
 TFTP_ROOT="${3:-${TFTP_ROOT:-/var/lib/tftpboot}}"
 
-# Validate MAC format (six colon-separated hex pairs, case-insensitive)
-if ! [[ "$MAC" =~ ^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$ ]]; then
-    echo "error: MAC must be aa:bb:cc:dd:ee:ff format; got $MAC" >&2
+# Validate serial format: 8 hex chars, case-insensitive (we normalize
+# to lowercase for filesystem use). The Pi bootloader formats the
+# serial as 8 lowercase hex chars — match that exactly.
+if ! [[ "$SERIAL" =~ ^[0-9a-fA-F]{8}$ ]]; then
+    echo "error: SERIAL must be 8 hex chars (e.g. 7614437e); got $SERIAL" >&2
+    echo "       find it via dnsmasq.log TFTP attempts, or on a booted Pi:" >&2
+    echo "         vcgencmd otp_dump | awk -F: '/^28:/{print \$2}'" >&2
     exit 2
 fi
+SERIAL=$(echo "$SERIAL" | tr '[:upper:]' '[:lower:]')
 
 [[ -f "$IMG" ]] || { echo "error: image not found: $IMG" >&2; exit 2; }
 
@@ -53,9 +72,7 @@ if [[ "$EUID" -ne 0 ]]; then
     exit 2
 fi
 
-# Normalize MAC for filesystem use.
-MAC_DASHED=$(echo "$MAC" | tr ':' '-' | tr '[:upper:]' '[:lower:]')
-DEST="$TFTP_ROOT/$MAC_DASHED"
+DEST="$TFTP_ROOT/$SERIAL"
 
 # Pick decompressor by extension.
 case "$IMG" in
@@ -87,10 +104,8 @@ echo "→ decompress $IMG → $RAW"
 "${DECOMP[@]}" "$IMG" > "$RAW"
 
 # Detect partitioned vs single-FAT.
-# Partitioned images report "DOS/MBR boot sector" with partitions.
-# Single-FAT (Alpine RPi-style) reports as "DOS/MBR boot sector" too,
-# so we check by trying mdir first (single-FAT) then fall through
-# to losetup (partitioned).
+# Single-FAT (Alpine RPi-style) is readable by mdir directly.
+# Partitioned (Raspbian/Debian/Fedora) is not, fall through to losetup.
 mkdir -p "$DEST"
 echo "→ tftp dest: $DEST"
 
@@ -124,29 +139,36 @@ else
     unset LOOP
 fi
 
-# Make TFTP-readable for the dnsmasq user.
+# Make TFTP-readable for the dnsmasq daemon. The PARENT dir
+# (/var/lib/tftpboot) needs o+x too, but that's a one-time
+# operator setup — flagged in design/infra_pxe.md §8.
 chmod -R a+rX "$DEST"
 
-# Quick sanity check — Pi PXE needs bootcode.bin OR start4.elf at
-# minimum. Both are normal Pi-firmware file names.
+# Quick sanity check. Pi 4 / CM4 / Pi 5 firmware reads
+# start4.elf or start.elf from the bootloader EEPROM's first
+# TFTP attempt (NOT bootcode.bin — that's the Pi 3 / older path).
 echo "→ contents under $DEST:"
 ls -la "$DEST" | head -20
 echo
-if [[ -f "$DEST/bootcode.bin" ]]; then
-    echo "✓ bootcode.bin present (Pi 4 / older Pi 5 bootloader)"
-fi
 if [[ -f "$DEST/start4.elf" ]] || [[ -f "$DEST/start.elf" ]]; then
-    echo "✓ start*.elf present"
+    echo "✓ start*.elf present (Pi 4 / CM4 / Pi 5 path)"
 fi
-if ! [[ -f "$DEST/bootcode.bin" || -f "$DEST/start4.elf" || -f "$DEST/start.elf" ]]; then
-    echo "⚠ no bootcode.bin / start*.elf — image may not PXE-boot." >&2
+if [[ -f "$DEST/bootcode.bin" ]]; then
+    echo "✓ bootcode.bin present (Pi 3 / older path; ignored by Pi 4+)"
+fi
+if ! [[ -f "$DEST/start4.elf" || -f "$DEST/start.elf" ]]; then
+    echo "⚠ no start*.elf — image will not PXE-boot on Pi 4/CM4/Pi 5." >&2
     echo "  Check that $IMG actually has a Pi boot partition." >&2
 fi
 
 echo
 echo "Done. Next steps:"
-echo "  1. Make sure /etc/dnsmasq.d/pi-bake-pxe.conf has:"
-echo "       dhcp-host=$MAC,set:pi-X,<IP>,pi-X,1h"
-echo "       dhcp-boot=tag:pi-X,$MAC_DASHED/bootcode.bin"
-echo "  2. sudo systemctl reload dnsmasq"
-echo "  3. Power-cycle the Pi. Tail /var/log/dnsmasq.log to watch."
+echo "  1. Make sure /var/lib/tftpboot/ is daemon-traversable:"
+echo "       ls -ld /var/lib/tftpboot/   # mode should end in r-x not r--"
+echo "       sudo chmod o+x /var/lib/tftpboot   # if needed"
+echo "  2. Optional — pin the Pi's IP via /etc/dnsmasq.d/pi-bake-pxe.conf:"
+echo "       dhcp-host=<MAC>,set:pi-X,<IP>,pi-X,1h"
+echo "       (NOTE: dhcp-boot= line NOT needed for Pi 4/CM4/Pi 5 — they"
+echo "        ignore option-67 prefix and use $SERIAL/ regardless.)"
+echo "  3. sudo systemctl reload dnsmasq"
+echo "  4. Power-cycle the Pi. Tail /var/log/dnsmasq.log to watch."
