@@ -183,7 +183,6 @@ def _cmd_build(args: argparse.Namespace) -> int:
                 if args.wifi_ssid else None
             ),
             packages=list(args.package or []),
-            apk_fetch=args.apk_fetch,
             ssh_host_key=args.ssh_host_key or "",
             config_txt=list(args.config_txt or []),
             modules=list(args.module or []),
@@ -324,14 +323,10 @@ def _build_parser() -> argparse.ArgumentParser:
              "'IDENTIFICATION HAS CHANGED' warnings. Omit to let pi-bake "
              "auto-generate a fresh ed25519 pair per bake.",
     )
-    p_b.add_argument(
-        "--apk-fetch", action="store_true", default=False,
-        help="bake-time apk-fetch: download --package extras + their "
-             "recursive deps from upstream Alpine repos at BAKE time and "
-             "stage them in the FAT image. First-boot install runs offline "
-             "(no internet needed on the Pi). Required for air-gapped "
-             "appliances. Bake host needs network + tar + cpio.",
-    )
+    # NOTE: --apk-fetch removed in #3 — bake-time fetch + init-time
+    # install is always-on whenever --package is set. The YAML
+    # `apk_fetch:` field is silently accepted (no-op) for back-compat
+    # but the CLI flag is gone. See design/#3_study.md.
     p_b.add_argument(
         "--config-txt", action="append", metavar="LINE",
         help="line appended to /boot/usercfg.txt on FAT (repeatable). "

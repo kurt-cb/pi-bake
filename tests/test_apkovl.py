@@ -267,42 +267,71 @@ def test_no_firstboot_script_when_no_extras(tmp_path):
     assert "etc/runlevels/default/local" not in names
 
 
-def test_extra_packages_NOT_in_world(tmp_path):
-    """Regression for the v0.0.8 DHCP bug. Alpine init's first-boot
-    `apk add --root $sysroot --no-network $world` FAILS WHOLESALE if
-    any package in /etc/apk/world isn't in the local /apks cache
-    (stock RPi tarball only ships ~150 packages — no avahi, dbus,
-    linux-firmware-intel, etc.). That whole-transaction failure left
-    dhcpcd uninstalled → no DHCP → 169.x APIPA on first boot.
+def test_extras_LAND_in_world(tmp_path):
+    """#3 inverted v0.0.9's split: with the signed-APKINDEX regen
+    flow, extras DO go into /etc/apk/world. Init's `apk add
+    --no-network` resolves them from the same /apks/<arch>/ cache
+    as the baseline, verified via the pi-bake-signed APKINDEX
+    whose pubkey lives in the apkovl's /etc/apk/keys/.
 
-    v0.0.9 fix: extras go to /etc/local.d/install-extras.start which
-    runs ONLINE after dhcpcd has converged. /etc/apk/world stays
-    baseline-only."""
+    Watch out: this test exercises ONLY the apkovl writer, not
+    the full bake. It calls _write_apkovl directly without
+    triggering apkfetch (which needs network + apk-tools-static).
+    The end-to-end pubkey-signed flow is verified by a real bake
+    against examples/pi-5-be200-edge.yaml — see CLAUDE.md
+    'How to verify a behavior change' section."""
     n = NodeConfig(hostname="pi", ssh_pubkey=_PUBKEY)
     extras = ["avahi", "dbus", "linux-firmware-intel"]
     with _bake(n, tmp_path, extra_packages=extras) as tf:
         world = set(_extract(tf, "etc/apk/world").split())
-        names = set(tf.getnames())
     for pkg in extras:
-        assert pkg not in world, f"{pkg} leaked into /etc/apk/world"
-    assert "etc/local.d/install-extras.start" in names
-    assert "etc/runlevels/default/local" in names
+        assert pkg in world, f"{pkg} missing from /etc/apk/world"
+    # Baseline still present alongside extras (one transaction).
+    assert {"openssh-server", "dhcpcd", "chrony"} <= world
 
 
-def test_install_extras_script_runs_apk_add(tmp_path):
-    """The install-extras.start script must invoke `apk add` with the
-    declared extras, wait for network convergence, and self-disable
-    on success so re-runs are no-ops."""
+def test_no_install_extras_script_under_3(tmp_path):
+    """#3 deleted the install-extras.start path entirely. With
+    extras declared, no local.d script + no `local` runlevel
+    symlink (unless wifi enables it for the power-save fix)."""
     n = NodeConfig(hostname="pi", ssh_pubkey=_PUBKEY)
     with _bake(n, tmp_path, extra_packages=["avahi", "dbus"]) as tf:
-        script = _extract(tf, "etc/local.d/install-extras.start")
-    assert script.startswith("#!/bin/sh")
-    assert "apk add avahi dbus" in script
-    # Network-convergence wait — must not fire apk add against a
-    # network that hasn't come up yet.
-    assert "ip route get" in script
-    # Self-disable marker — second boot should be a no-op.
-    assert "install-extras.done" in script
+        names = set(tf.getnames())
+    assert "etc/local.d/install-extras.start" not in names
+    # No wifi → no `local` runlevel.
+    assert "etc/runlevels/default/local" not in names
+
+
+def test_signing_pubkey_baked_into_keys_dir(tmp_path):
+    """When apkfetch's bake-time signing key is provided, its
+    pubkey lands in /etc/apk/keys/ in the apkovl so init's apk
+    add trusts the regenerated APKINDEX."""
+    n = NodeConfig(hostname="pi", ssh_pubkey=_PUBKEY)
+    pubkey_name = "pi-bake-abcd1234.rsa.pub"
+    pubkey_bytes = b"-----BEGIN PUBLIC KEY-----\nFAKE-PUBKEY\n-----END PUBLIC KEY-----\n"
+    out = tmp_path / "node.apkovl.tar.gz"
+    _write_apkovl(
+        out, n,
+        apk_signing_pubkey_bytes=pubkey_bytes,
+        apk_signing_pubkey_name=pubkey_name,
+    )
+    import tarfile
+    with tarfile.open(out, "r:gz") as tf:
+        names = set(tf.getnames())
+        body = tf.extractfile(f"etc/apk/keys/{pubkey_name}").read()
+    assert f"etc/apk/keys/{pubkey_name}" in names
+    assert body == pubkey_bytes
+
+
+def test_no_signing_pubkey_when_unprovided(tmp_path):
+    """No extras → no APKINDEX regen → no pi-bake key in apkovl.
+    /etc/apk/keys/ stays empty (Alpine's devel keys come from
+    initramfs via `cp -a` at boot time)."""
+    n = NodeConfig(hostname="pi", ssh_pubkey=_PUBKEY)
+    with _bake(n, tmp_path) as tf:
+        names = set(tf.getnames())
+    # No pi-bake-* key when we didn't fetch extras.
+    assert not any(n.startswith("etc/apk/keys/pi-bake-") for n in names)
 
 
 # --------------------------------------------------------------------------- #
@@ -389,57 +418,12 @@ def test_ssh_host_key_unknown_type_rejected():
 
 
 # --------------------------------------------------------------------------- #
-# Bake-time apk-fetch — air-gap install-extras script (v0.2)                   #
+# (The v0.2-era `install-extras.start` script tests were removed by #3.       #
+#  Init-time install via signed APKINDEX replaces it — see                    #
+#  test_extras_LAND_in_world / test_signing_pubkey_baked_into_keys_dir above. #
+#  End-to-end signing verified by real bakes against                          #
+#  examples/pi-5-be200-edge.yaml, not unit-tested here.)                      #
 # --------------------------------------------------------------------------- #
-
-def test_install_extras_offline_when_apk_fetch_used(tmp_path):
-    """With apk_fetch_used=True the install-extras script must use
-    `apk add --no-network --allow-untrusted` against the bake-time-
-    staged .apks in /media/mmcblk0/apks/*/extras/. NEVER `apk update`
-    or talk to the network."""
-    n = NodeConfig(hostname="pi", ssh_pubkey=_PUBKEY)
-    with _bake(n, tmp_path,
-               extra_packages=["avahi", "dbus"],
-               apk_fetch_used=True) as tf:
-        script = _extract(tf, "etc/local.d/install-extras.start")
-    assert script.startswith("#!/bin/sh")
-    # Offline install command.
-    assert "--no-network" in script
-    assert "--allow-untrusted" in script
-    # Points at the bake-time staging dir.
-    assert "/media/mmcblk0/apks/*/extras" in script
-    # Must NOT use the online-install commands the v0.0.9 path uses.
-    assert "apk update" not in script
-    assert "ip route get" not in script
-    # Self-disable marker is still there.
-    assert "install-extras.done" in script
-
-
-def test_install_extras_offline_does_not_list_package_names(tmp_path):
-    """The offline script installs by FILE GLOB, not by package name —
-    package names from `packages:` aren't needed at first-boot time
-    because the .apk files (with all metadata) are already staged."""
-    n = NodeConfig(hostname="pi", ssh_pubkey=_PUBKEY)
-    with _bake(n, tmp_path,
-               extra_packages=["linux-firmware-intel"],
-               apk_fetch_used=True) as tf:
-        script = _extract(tf, "etc/local.d/install-extras.start")
-    # The script is keyed off the staged files, not the recipe pkg list.
-    assert "linux-firmware-intel" not in script
-
-
-def test_install_extras_online_unchanged_when_apk_fetch_off(tmp_path):
-    """Default (apk_fetch_used=False) preserves v0.0.9 online-install
-    behavior. Used when the operator opts OUT of bake-time fetch (or
-    just hasn't opted in yet)."""
-    n = NodeConfig(hostname="pi", ssh_pubkey=_PUBKEY)
-    with _bake(n, tmp_path, extra_packages=["avahi", "dbus"]) as tf:
-        script = _extract(tf, "etc/local.d/install-extras.start")
-    # Online flavor: apk update + apk add by name + ip route wait.
-    assert "apk update" in script
-    assert "apk add avahi dbus" in script
-    assert "--no-network" not in script
-    assert "--allow-untrusted" not in script
 
 
 # --------------------------------------------------------------------------- #

@@ -418,16 +418,21 @@ def test_recipe_to_node_config_ssh_host_key_missing_pub_errors(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# apk_fetch — bake-time package fetch for air-gap appliances (v0.2)            #
+# apk_fetch — DEPRECATED no-op since #3 (always-on when packages: is non-empty)#
 # --------------------------------------------------------------------------- #
 
-def test_apk_fetch_defaults_false(tmp_path):
-    """Omitted apk_fetch defaults to False (v0.0.9 behavior preserved)."""
+def test_apk_fetch_defaults_false_in_schema(tmp_path):
+    """Field defaults False on a recipe with no explicit value.
+    Functionally meaningless (#3 made bake-time fetch always-on
+    whenever packages: is non-empty), but the field still loads
+    so old recipes don't fail-load."""
     r = _write_and_load(tmp_path, _minimal_yaml())
     assert r.apk_fetch is False
 
 
-def test_apk_fetch_yaml_true_loads(tmp_path):
+def test_apk_fetch_yaml_true_still_loads(tmp_path):
+    """Existing recipes with `apk_fetch: true` keep loading;
+    field is accepted but no longer affects bake behavior."""
     body = _minimal_yaml() + "apk_fetch: true\npackages:\n  - avahi\n"
     r = _write_and_load(tmp_path, body)
     assert r.apk_fetch is True
@@ -448,20 +453,27 @@ def test_apk_fetch_round_trips(tmp_path):
     assert r2.apk_fetch is True
 
 
-def test_apk_fetch_non_bool_rejected(tmp_path):
+def test_apk_fetch_non_bool_still_rejected(tmp_path):
+    """Schema validation still catches type errors on the field
+    even though the value's a no-op — operator typos shouldn't
+    silently parse."""
     body = _minimal_yaml() + 'apk_fetch: "yes"\n'
     with pytest.raises(ValueError, match="apk_fetch"):
         _write_and_load(tmp_path, body)
 
 
-def test_apk_fetch_passes_to_build_kwargs():
+def test_apk_fetch_NOT_in_build_kwargs():
+    """recipe_to_node_config intentionally drops apk_fetch from
+    build_kwargs since the bake doesn't honor it anymore. This
+    test pins the behavior so future drive-by edits don't
+    re-add it."""
     r = Recipe(
         hostname="t", board="pi-5", os="alpine",
         ssh_pubkey=_PUBKEY, apk_fetch=True,
         output=OutputSpec(path="/tmp/x.img.gz"),
     )
     _, kwargs = recipe_to_node_config(r)
-    assert kwargs["apk_fetch"] is True
+    assert "apk_fetch" not in kwargs
 
 
 # --------------------------------------------------------------------------- #

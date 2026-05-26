@@ -168,9 +168,16 @@ network:
 #   - py3-pydbus
 #   - linux-firmware-brcm
 
-# Enable bake-time apk-fetch for air-gap appliance use. Pulls every
-# package above (+ recursive deps) into the FAT image at bake time
-# so the Pi installs them offline on first boot. Default false.
+# Bake-time apk-fetch is now ALWAYS-ON when `packages:` is set.
+# Every operator-declared package + recursive deps gets pulled from
+# upstream Alpine at bake time, dropped into FAT alongside the stock
+# cache, indexed + signed, and installed AT INIT TIME from
+# /etc/apk/world. Pi never needs internet on first boot; everything
+# is in place before sshd starts.
+#
+# The `apk_fetch:` field below is DEPRECATED — it's silently
+# accepted for backward-compat with recipes from earlier versions
+# but ignored. Remove it from new recipes.
 # apk_fetch: true
 
 # --------------------------------------------------------------------------

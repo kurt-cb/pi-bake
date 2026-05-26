@@ -43,12 +43,12 @@ modules:
   - mcp251x
   - can_dev
 
-# CAN userspace tooling. apk_fetch: true pulls these + recursive
-# deps at bake time so the Pi can install offline on first boot.
+# CAN userspace tooling. Bake-time apk-fetch + init-time install
+# is now always-on whenever `packages:` is set (see ROADMAP #4 +
+# #8) — recursive deps are pulled at bake time and the Pi
+# installs everything offline at init.
 packages:
   - can-utils
-
-apk_fetch: true
 
 output:
   path: ~/sdcards/can-pi.img.gz

@@ -9,11 +9,11 @@ versions get assigned at tag time, not here.
 |  1 |  ✅   | [YAML recipes (`--config <yaml>` + `--to-yaml`)](#1-yaml-recipes) |
 |  2 |  ✅   | [Alpine `edge` OS version](#2-alpine-edge-os-version) |
 |  3 |  ✅   | [Pre-baked SSH host keys](#3-pre-baked-ssh-host-keys) |
-|  4 |  ✅   | [Bake-time apk-fetch (offline first boot)](#4-bake-time-apk-fetch-offline-first-boot) |
+|  4 |  ✅   | [Bake-time apk-fetch (offline first boot — init-time install)](#4-bake-time-apk-fetch-offline-first-boot) |
 |  5 |  ✅   | [pibakehub v1 frozen design + 8-fragment pilot](#5-pibakehub-v1-frozen-design--pilot) |
 |  6 |  ✅   | [HAT overlays + `/etc/modules` (FAT writes)](#6-hat-overlays--etcmodules-fat-writes) |
 |  7 |  🔴   | [`--pibakehub` wired into `pi-bake build`](#7---pibakehub-wired-into-pi-bake-build) |
-|  8 |  ⬜   | [Init-time install of bake-staged extras (signed APKINDEX)](#8-init-time-install-of-bake-staged-extras-signed-apkindex) |
+|  8 |  ✅   | [Init-time install of bake-staged extras (signed APKINDEX)](#8-init-time-install-of-bake-staged-extras-signed-apkindex) |
 |  9 |  ⬜   | [Raspbian backend (`.img.xz`, losetup)](#9-raspbian-backend) |
 | 10 |  ⬜   | [Fedora IoT / Fedora ARM backend](#10-fedora-backend) |
 | 11 |  ⬜   | [Debian (community Pi images) backend](#11-debian-backend) |
@@ -109,27 +109,30 @@ boot). Key type is detected from the pubkey's first word
 
 ---
 
-## 4. Bake-time apk-fetch (offline first boot)
-**✅ shipped**
+## 4. Bake-time apk-fetch (offline first boot — init-time install)
+**✅ shipped** (originally landed v0.2 with a `local.d` post-sshd
+installer; reworked by #8 to install at init time via a signed
+APKINDEX, removing the late-boot script entirely)
 
-`apk_fetch: true` in a recipe (or `--apk-fetch` on the CLI)
-drives pi-bake to pull every operator-declared `packages:` entry
-+ all recursive deps from upstream Alpine at BAKE time using
-apk-tools-static (auto-downloaded into `~/.cache/pi-bake/`). The
-.apk files land in the FAT image at
-`/media/mmcblk0/apks/<arch>/extras/`, and a first-boot `local.d`
-script installs them with `apk add --no-network
---allow-untrusted`. Device boots fully provisioned with zero
-internet on the Pi.
+Operator declares `packages:` in their recipe. Pi-bake fetches
+the named packages + all recursive deps from upstream Alpine at
+BAKE time using apk-tools-static (auto-downloaded into
+`~/.cache/pi-bake/`). The `.apk` files land in the FAT image at
+`/media/mmcblk0/apks/<arch>/` (flat, alongside the stock cache);
+the APKINDEX gets regenerated and signed with a fresh per-bake
+RSA key; the matching pubkey is baked into the apkovl's
+`/etc/apk/keys/`. The packages also go into `/etc/apk/world` so
+init's `apk add --no-network` installs everything in one
+transaction at INIT TIME — same code path as the baseline. By
+the time sshd starts, the Pi is fully provisioned.
 
-Bake-host needs: `tar`, `cpio`, and network access to
-dl-cdn.alpinelinux.org on the first run (apk-tools-static is
+Always-on whenever `packages:` is non-empty. The `apk_fetch:`
+YAML field is a DEPRECATED no-op kept in the schema so old
+recipes don't fail-load; the CLI `--apk-fetch` flag was removed.
+
+Bake-host needs: `tar`, `cpio`, `openssl`, and network access
+to dl-cdn.alpinelinux.org on the first run (apk-tools-static is
 then cached for subsequent bakes).
-
-This path installs extras POST-sshd (`local` runlevel runs after
-`default`). For appliances that need extras loaded BEFORE sshd
-starts (e.g. firmware required by early-boot kernel modules),
-see **#8**.
 
 ---
 
@@ -217,46 +220,57 @@ design but don't reach the SD card.
 ---
 
 ## 8. Init-time install of bake-staged extras (signed APKINDEX)
-**⬜ not started**
+**✅ shipped — collapses the baseline-vs-extras split**
 
-Today (#4) extras install POST-sshd via a `local.d` script that
-runs `apk add --no-network --allow-untrusted` against
-FAT-staged .apks. Works offline, but extras finish installing
-*after* the device is reachable. For firmware required by
-early-boot drivers (iwlwifi, brcm, etc.) this can mean the
-radio doesn't come up until a second reboot.
+Originally a two-paths design (#4 used a `local.d` post-sshd
+script with `--allow-untrusted`); the user pushed back that
+there's no good reason to have two paths, and #8 collapses
+them. After #8, operator-declared `packages:` get the same
+init-time install path as the baseline. Result: one code path,
+one install moment, no `/etc/local.d/install-extras.start`.
 
-The init-time path:
+Bake-time steps when `packages:` is non-empty:
 
-1. Regenerate `/apks/<arch>/APKINDEX.tar.gz` at bake time to
-   include the operator's extras + deps alongside the stock
-   packages.
-2. Sign the new index with a bake-time-generated RSA key.
-3. Bake the public key into the apkovl's
-   `/etc/apk/keys/pi-bake-<random>.rsa.pub`.
-4. Move extras from `local.d` into `/etc/apk/world`.
+1. Fetch extras + all recursive deps from upstream Alpine
+   into `/apks/<arch>/` (flat, alongside the stock cache —
+   no `extras/` subdir).
+2. Regenerate `APKINDEX.tar.gz` over the union of stock + new
+   `.apk` files via `apk index --allow-untrusted` (the
+   "--allow-untrusted" skips per-file SHA-1 signature verify,
+   which modern apk-tools-static rejects; init's apk on the
+   Pi uses the older bundled apk-tools that does trust the
+   alpine-devel SHA-1 signatures, so .apks are properly
+   verified at install time).
+3. Sign the regenerated index with a fresh per-bake RSA-2048
+   key via `openssl dgst -sha256 -sign`. Member name
+   `.SIGN.RSA256.pi-bake-<8hex>.rsa.pub` (RSA-SHA256, not
+   the legacy RSA-SHA1 — modern OpenSSL rejects SHA-1 RSA;
+   apk-tools 2.6+ accepts SHA-256).
+4. Bake the matching pubkey into the apkovl at
+   `/etc/apk/keys/pi-bake-<8hex>.rsa.pub`. Init's `cp -a
+   /etc/apk/keys $sysroot/etc/apk` (line ~936 of
+   `boot/initramfs-rpi/init`) merges this with Alpine's
+   official devel keys from initramfs.
+5. Operator extras go into `/etc/apk/world` alongside the
+   baseline. `/etc/local.d/install-extras.start` is no longer
+   generated (deleted entirely from `_write_apkovl`).
 
-Init's `apk add --root $sysroot --no-network $(cat
-$sysroot/etc/apk/world)` then resolves both stock + extras
-during init. The init script copies initramfs's
-`/etc/apk/keys/` into the sysroot before this call (line ~936
-of `boot/initramfs-rpi/init`), and `cp -a` merges with whatever
-the apkovl provided — so our bake-time pubkey coexists with
-Alpine's official keys. Verified by reading the init script
-directly.
+End-to-end verified: bake of `examples/pi-5-be200-edge.yaml`
+produces a 211 MB image with:
+- 163-package signed APKINDEX (100 stock + 63 extras incl.
+  deps)
+- `etc/apk/world` listing all 14 packages (baseline + extras)
+- `etc/apk/keys/pi-bake-<hex>.rsa.pub` in the apkovl
+- No `etc/local.d/install-extras.start`
 
-Why not done yet: signing/index work is real (abuild-sign style
-RSA-SHA1 + tar prepend) and #4's `local.d` path already covers
-the air-gap use case for most operators.
-
-No new operator burden: same `packages: [...]` + `apk_fetch:
-true` recipe, just installs at a different moment.
+See `design/#3_study.md` for the full architecture writeup
+that informed this implementation.
 
 **FAT size is NOT a constraint here.** pi-bake creates the FAT
 from scratch via `mformat` and the operator controls its size
 through `output.image_size_mb`. The "stock cache is small"
 phrasing in earlier notes only described what Alpine *ships*
-upstream (~150 packages); pi-bake can put as many .apks in
+upstream (~100 packages); pi-bake can put as many .apks in
 `/apks/<arch>/` as fits in the operator-chosen FAT. See also
 #16 for operator-managed FAT contents beyond .apks.
 

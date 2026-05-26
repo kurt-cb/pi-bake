@@ -46,7 +46,6 @@ def bake(
     alpine_branch: str = "v3.21",
     extra_packages: list[str] | None = None,
     arch: str = "aarch64",
-    apk_fetch: bool = False,
 ) -> Path:
     """Build an Alpine RPi `.img.gz` for `node`. Returns out_path.
 
@@ -57,21 +56,19 @@ def bake(
         Affects post-boot `apk` operations only; the bundled /apks
         cache still comes from the tarball.
 
-    `extra_packages`: additional apk package names appended to
-        `/etc/apk/world`. Behavior depends on `apk_fetch`:
-        - `apk_fetch=False` (default): packages are installed by a
-          first-boot `local.d` script after dhcpcd brings the
-          network up. Pi must reach the internet on first boot.
-        - `apk_fetch=True`: packages are fetched at BAKE TIME from
-          upstream Alpine repos, staged into the FAT image's
-          `/apks/<arch>/extras/`, and installed by the first-boot
-          script via `apk add --no-network --allow-untrusted`. No
-          internet required on the Pi.
+    `extra_packages`: additional apk package names. When set,
+        pi-bake fetches them + all recursive deps from upstream
+        Alpine at bake time, drops the .apk files into
+        `/apks/<arch>/` alongside the stock cache, regenerates and
+        signs a fresh APKINDEX, and bakes the matching pubkey into
+        the apkovl's `/etc/apk/keys/`. The packages land in
+        `/etc/apk/world` so init's `apk add --no-network` installs
+        them at INIT TIME (before sshd starts) — same code path as
+        the baseline. No internet needed on the Pi. (See
+        design/#3_study.md for the architecture.)
 
     `arch`: target arch for the Pi (matches `Board.arch` —
         `aarch64`, `armhf`). Drives cross-arch `apk fetch`.
-
-    `apk_fetch`: opt-in air-gap support. See `extra_packages` above.
     """
     _require_tools("mformat", "mcopy", "mmd")
 
@@ -101,31 +98,46 @@ def bake(
             except TypeError:
                 tf.extractall(extracted)
 
-        # 2.5. Optional: bake-time apk-fetch. Stages operator extras
-        # + recursive deps into the extracted tree's apks/<arch>/
-        # extras/ so the FAT image carries them. First-boot script
-        # then installs offline with --no-network --allow-untrusted.
-        # Without this, extras need the Pi to reach the internet on
-        # first boot (current v0.0.9 default).
-        apk_fetch_used = False
-        if (extra_packages or []) and apk_fetch:
+        # 2.5. Bake-time apk-fetch + signed-index regen, whenever
+        # the operator declares extras. Drops fetched .apks into
+        # /apks/<arch>/ alongside the stock cache (flat layout),
+        # regenerates APKINDEX.tar.gz with a fresh RSA signing key,
+        # bakes the matching pubkey into the apkovl. Init's
+        # `apk add --root $sysroot --no-network` then installs
+        # operator extras AT INIT TIME from the same code path as
+        # the stock baseline — no late-boot local.d script needed.
+        # See design/#3_study.md for the architecture; pieces live
+        # in apkfetch.py.
+        apk_signing_pubkey_bytes = b""
+        apk_signing_pubkey_name = ""
+        extras = list(extra_packages or [])
+        if extras:
             from pi_bake import apkfetch
-            LOG.info("bake-time apk-fetch enabled: %d package(s)",
-                     len(extra_packages or []))
+            LOG.info("bake-time apk-fetch: %d package(s)", len(extras))
             apk_static = apkfetch.ensure_apk_static()
             keys_dir = apkfetch.extract_initramfs_keys(
                 extracted, td / "initramfs-keys",
             )
-            extras_dir = extracted / "apks" / arch / "extras"
+            apks_dir = extracted / "apks" / arch
             apkfetch.fetch_packages(
                 apk_static=apk_static,
                 target_arch=arch,
                 alpine_branch=alpine_branch,
-                packages=extra_packages or [],
-                out_dir=extras_dir,
+                packages=extras,
+                out_dir=apks_dir,
                 keys_dir=keys_dir,
             )
-            apk_fetch_used = True
+            privkey, pubkey, pubkey_name = apkfetch.make_signing_key(
+                td / "signing",
+            )
+            apkfetch.regen_signed_index(
+                apk_static=apk_static,
+                apks_dir=apks_dir,
+                privkey=privkey,
+                pubkey_name=pubkey_name,
+            )
+            apk_signing_pubkey_bytes = pubkey.read_bytes()
+            apk_signing_pubkey_name = pubkey_name
 
         # 2.6. Optional: /boot/usercfg.txt FAT edit (Recipe.config_txt).
         # The stock Alpine config.txt has `include usercfg.txt` already,
@@ -149,8 +161,9 @@ def bake(
         _write_apkovl(
             apkovl_path, node,
             alpine_branch=alpine_branch,
-            extra_packages=extra_packages or [],
-            apk_fetch_used=apk_fetch_used,
+            extra_packages=extras,
+            apk_signing_pubkey_bytes=apk_signing_pubkey_bytes,
+            apk_signing_pubkey_name=apk_signing_pubkey_name,
         )
         _mcopy_into(img, apkovl_path, "/")
 
@@ -209,40 +222,43 @@ def _write_apkovl(
     *,
     alpine_branch: str = "v3.21",
     extra_packages: list[str] | None = None,
-    apk_fetch_used: bool = False,
+    apk_signing_pubkey_bytes: bytes = b"",
+    apk_signing_pubkey_name: str = "",
 ) -> None:
     """Build an Alpine apkovl.tar.gz for `node`.
 
-    Strategy: rely on Alpine RPi's diskless init, which on first boot
-    runs `apk add --root $sysroot --no-network` reading packages from
-    the overlay's `/etc/apk/world` and pulling apks from the local
-    `/media/mmcblk0/apks/` cache that ships in the tarball. So as long
-    as everything we want is in the stock cache, no network is needed
-    to come up with sshd + DHCP + NTP wired up. No first-boot script,
-    no over-the-network apk fetch dance — the package set just IS at
-    the end of the first boot.
+    Strategy: rely on Alpine RPi's diskless init, which on first
+    boot runs `apk add --root $sysroot --no-network` reading
+    packages from the overlay's `/etc/apk/world` and pulling
+    .apks from `/media/mmcblk0/apks/<arch>/` (the FAT-resident
+    cache). Everything ships from one transaction at init time —
+    no late-boot scripts, no network on first boot.
 
-    Stock Alpine RPi tarball (verified) ships: openssh-server,
-    openssh-server-common-openrc, dhcpcd, dhcpcd-openrc, chrony,
-    chrony-openrc, wpa_supplicant, wpa_supplicant-openrc, iw,
-    ifupdown-ng-wifi, ca-certificates-bundle. NOT shipped: avahi,
-    dbus, linux-firmware-brcm, linux-firmware-intel — those need
-    a bake-time fetch (future v0.2 work, see ROADMAP.md).
+    Stock Alpine RPi tarball ships ~100 baseline .apks in
+    /apks/<arch>/ (sshd, dhcpcd, chrony, wpa_supplicant, etc.).
+    Operator-declared `packages:` extras get fetched + dropped
+    into the SAME directory at bake time, and the APKINDEX gets
+    regenerated + signed with a fresh per-bake RSA key. The
+    matching pubkey is baked into /etc/apk/keys/ so init's apk
+    add trusts the new index. See apkfetch.py +
+    design/#3_study.md for the architecture.
 
-    DHCP choice: dhcpcd, not busybox udhcpc. udhcpc 1.37 + Alpine 3.21
-    + Pi 5's macb driver hangs with "address family not supported".
-    dhcpcd is more reliable across kernels and is what setup-alpine
-    selects by default in recent releases.
+    DHCP choice: dhcpcd, not busybox udhcpc. udhcpc 1.37 + Alpine
+    3.21 + Pi 5's macb driver hangs with "address family not
+    supported". dhcpcd is more reliable across kernels and is
+    what setup-alpine selects by default in recent releases.
 
     Files we lay down (paths relative to /):
       etc/hostname                    — node.hostname
       etc/hosts                       — localhost + hostname entry
       etc/timezone                    — node.timezone
       etc/ssh/sshd_config             — root-by-key only, no passwords
+      etc/ssh/ssh_host_<type>_key{,.pub} — stable host identity
       root/.ssh/authorized_keys       — node.all_pubkeys
       etc/network/interfaces          — lo only (+ eth0 static path)
-      etc/apk/world                   — packages init will install
+      etc/apk/world                   — baseline + operator extras (init installs)
       etc/apk/repositories            — local cache + upstream main/community
+      etc/apk/keys/<pi-bake-…>.rsa.pub — when extras were fetched + signed
       etc/runlevels/default/sshd      — symlink, started at boot
       etc/runlevels/default/dhcpcd    — symlink (skipped on static-IP)
       etc/runlevels/default/chronyd   — symlink
@@ -436,98 +452,43 @@ def _write_apkovl(
             "iw",
             "ifupdown-ng-wifi",
         ]
-    # /etc/apk/world: ONLY packages in the stock RPi /apks cache.
-    # Alpine init's first-boot does `apk add --no-network $world`
-    # — if ANY package isn't in the cache, the entire transaction
-    # fails wholesale (no dhcpcd, no sshd installed). Operator-
-    # declared extras (`packages:` in YAML — avahi, dbus,
-    # linux-firmware-*, etc.) are NOT in the stock cache; they go
-    # into a separate first-boot script instead (below) that runs
-    # AFTER the network is up.
+    # /etc/apk/world — the complete package set Alpine init
+    # installs from the local FAT cache at first boot:
+    #
+    #   apk add --root $sysroot --no-network $(cat etc/apk/world)
+    #
+    # Baseline (sshd/dhcpcd/chrony/etc.) ships in the stock RPi
+    # tarball's /apks/<arch>/ cache. Operator-declared extras
+    # (`packages:` in YAML — avahi, dbus, linux-firmware-*, etc.)
+    # were fetched into the same /apks/<arch>/ at bake time and
+    # the APKINDEX was regenerated + signed with a fresh
+    # pi-bake key (see apkfetch.py + design/#3_study.md).
+    # Trusting that key happens via the apk_signing_pubkey block
+    # below.
+    #
+    # ALL packages go in /etc/apk/world. There's no longer a
+    # "baseline vs extras" split — init's wholesale-or-nothing
+    # apk add handles everything in one transaction.
+    extras = sorted(set(extra_packages or []))
+    world_pkgs.extend(extras)
     members.append((
         "etc/apk/world",
         ("\n".join(world_pkgs) + "\n").encode(),
         0o644, False,
     ))
 
-    # /etc/local.d/install-extras.start — first-boot install of
-    # operator-declared `packages:` extras. Two shapes:
-    #
-    # apk_fetch_used=False (today's default — v0.0.9):
-    #   ONLINE install via `apk add` against upstream Alpine repos.
-    #   Runs at boot via OpenRC `local` service, AFTER dhcpcd has
-    #   brought eth0 up (default runlevel order:
-    #   sysinit → boot → default → local last). Pi must reach the
-    #   internet on first boot. Self-disables on success.
-    #
-    # apk_fetch_used=True (v0.2 air-gap path):
-    #   OFFLINE install. The bake-time apk-fetch stage already
-    #   staged extras + their recursive deps into the FAT image at
-    #   /media/mmcblk0/apks/<arch>/extras/. The script installs
-    #   them via `apk add --no-network --allow-untrusted <files>`
-    #   without touching the network. Device boots fully
-    #   provisioned offline.
-    #
-    # Self-disables either way via /var/lib/pi-bake/install-extras.done
-    # so re-runs are no-ops.
-    extras = sorted(set(extra_packages or []))
-    if extras:
-        if apk_fetch_used:
-            install_extras_sh = (
-                "#!/bin/sh\n"
-                "# Written by pi-bake — install bake-time-fetched extras OFFLINE.\n"
-                "# .apk files were staged into FAT at bake time; install with\n"
-                "# --no-network so the Pi never needs upstream connectivity.\n"
-                "# --allow-untrusted because the staged files weren't signed\n"
-                "# by an Alpine-trusted key (they came from upstream verified,\n"
-                "# then re-staged); switching to bake-time-signed APKINDEX is\n"
-                "# a future enhancement (see apkfetch.py docstring).\n"
-                "DONE=/var/lib/pi-bake/install-extras.done\n"
-                "[ -f \"$DONE\" ] && exit 0\n"
-                "EXTRAS=/media/mmcblk0/apks/*/extras\n"
-                "set -- $EXTRAS/*.apk\n"
-                "if [ ! -e \"$1\" ]; then\n"
-                "    echo 'install-extras: no .apk files in '\"$EXTRAS\"' — skipping' >&2\n"
-                "    exit 0\n"
-                "fi\n"
-                "if apk add --no-network --allow-untrusted \"$@\" 2>&1; then\n"
-                "    mkdir -p /var/lib/pi-bake\n"
-                "    touch \"$DONE\"\n"
-                "    exit 0\n"
-                "else\n"
-                "    echo 'install-extras: offline apk add failed — will retry next boot' >&2\n"
-                "    exit 1\n"
-                "fi\n"
-            )
-        else:
-            pkgs_arg = " ".join(extras)
-            install_extras_sh = (
-                "#!/bin/sh\n"
-                "# Written by pi-bake — install operator-declared `packages:`\n"
-                "# extras AFTER the network is up. Stock RPi /apks cache only\n"
-                "# carries the baseline (sshd/dhcpcd/chrony/etc.); anything\n"
-                "# in YAML `packages:` lands here for online apk add.\n"
-                "DONE=/var/lib/pi-bake/install-extras.done\n"
-                "[ -f \"$DONE\" ] && exit 0\n"
-                "# Wait up to 60s for a working route (dhcpcd convergence)\n"
-                "for i in $(seq 1 60); do\n"
-                "    ip route get 1.1.1.1 >/dev/null 2>&1 && break\n"
-                "    sleep 1\n"
-                "done\n"
-                "apk update 2>&1 || true\n"
-                f"if apk add {pkgs_arg} 2>&1; then\n"
-                "    mkdir -p /var/lib/pi-bake\n"
-                "    touch \"$DONE\"\n"
-                "    exit 0\n"
-                "else\n"
-                "    echo 'install-extras: apk add failed — will retry next boot' >&2\n"
-                "    exit 1\n"
-                "fi\n"
-            )
+    # /etc/apk/keys/<pi-bake-XXXX.rsa.pub> — trust our bake-time
+    # APKINDEX signature. Alpine RPi init's `cp -a /etc/apk/keys
+    # $sysroot/etc/apk` (line ~936 of boot/initramfs-rpi/init)
+    # merges initramfs's alpine-devel keys WITH whatever the
+    # apkovl provided here, so our key coexists with Alpine's
+    # official ones. apk-tools' verifier accepts a signature if
+    # ANY trusted key matches.
+    if apk_signing_pubkey_bytes:
         members.append((
-            "etc/local.d/install-extras.start",
-            install_extras_sh.encode(),
-            0o755, False,
+            f"etc/apk/keys/{apk_signing_pubkey_name}",
+            apk_signing_pubkey_bytes,
+            0o644, False,
         ))
 
     # /etc/dhcpcd.conf — dhcpcd default config does NOT send DHCP
@@ -610,12 +571,14 @@ def _write_apkovl(
     runlevel_svcs = ["networking", "sshd", "chronyd"]
     if not node.has_static_ip:
         runlevel_svcs.append("dhcpcd")
-    # `local` runs scripts in /etc/local.d/*.start at boot — needed
-    # both for the wlan power-save fix (when wifi is on) AND for
-    # the install-extras.start online apk-add (when packages: has
-    # non-stock entries). Adding `local` to the default runlevel is
-    # idempotent so we add it whenever either condition fires.
-    if node.has_wifi or extra_packages:
+    # `local` runs /etc/local.d/*.start at boot. Today the only
+    # consumer is the wlan power-save fix (BCM43438), so we only
+    # add it to the default runlevel when wifi is on. Operator-
+    # declared extras used to require `local` (for the v0.2-era
+    # install-extras.start script), but #3 moved that install
+    # path into init time via /etc/apk/world, so `local` is no
+    # longer needed for the extras workflow.
+    if node.has_wifi:
         runlevel_svcs.append("local")
     if node.has_wifi:
         runlevel_svcs.append("wpa_supplicant")

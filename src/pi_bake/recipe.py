@@ -140,22 +140,22 @@ class Recipe:
     paths are detected by '~/' prefix or being a real existing
     file. Mixed list allowed.
 
-    `packages`: extra apk package names. Behavior depends on
-    `apk_fetch` (below):
-    - `apk_fetch: false` (default): installed at first boot from
-      upstream Alpine repos — Pi needs internet on first boot.
-    - `apk_fetch: true`: fetched + recursive deps at BAKE TIME,
-      staged into the FAT image, installed offline on first boot.
+    `packages`: extra apk package names. When non-empty, pi-bake
+    fetches them + all recursive deps from upstream Alpine at
+    bake time, drops the .apk files into `/apks/<arch>/`
+    alongside the stock cache, regenerates + signs a fresh
+    APKINDEX, and adds the packages to `/etc/apk/world` so
+    init's `apk add --no-network` installs them at INIT TIME
+    (before sshd starts). Offline first boot, no late-boot
+    install script. Bake-time requirements: network access to
+    dl-cdn.alpinelinux.org, `tar` + `cpio` + `openssl` on the
+    bake host.
 
-    `apk_fetch`: opt-in air-gap support (Alpine only, v0.2). When
-    true and `packages:` is non-empty, the baker runs apk-tools-
-    static against upstream Alpine repos to download the package
-    set + all recursive deps, stages them at
-    `/media/mmcblk0/apks/<arch>/extras/` on the FAT partition, and
-    the first-boot script installs them with `apk add --no-network
-    --allow-untrusted`. No internet needed on the Pi. Bake-time
-    requirements: network access to dl-cdn.alpinelinux.org,
-    `tar` + `cpio` on the bake host.
+    `apk_fetch`: DEPRECATED no-op. Bake-time fetch is always-on
+    whenever `packages:` is non-empty (per the #3 redesign — see
+    `design/#3_study.md`). Field kept in the schema so existing
+    recipes don't fail-load with "unknown key"; the value is
+    ignored.
 
     `ssh_host_key`: path to an OpenSSH private key (e.g.
     `~/.ssh/host-keys/td-pi5-1.ed25519`). The matching public key
@@ -485,7 +485,9 @@ def recipe_to_node_config(r: Recipe):
         "version": r.os_version or None,
         "out_path": str(Path(r.output.path).expanduser()),
         "extra_packages": list(r.packages),
-        "apk_fetch": r.apk_fetch,
+        # r.apk_fetch is intentionally NOT threaded through: it's a
+        # deprecated no-op since #3 made init-time install the only
+        # path. Kept as a schema field so old recipes don't break.
     }
     if r.output.image_size_mb:
         build_kwargs["image_size_mb"] = r.output.image_size_mb

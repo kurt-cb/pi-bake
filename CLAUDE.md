@@ -55,14 +55,24 @@ just bolt it on.
   /etc/apk/repositories.
 - **Pi Zero W BCM43438 power-save fix** — auto-baked
   `/etc/local.d/wlan-power-save-off.start` when wifi is on.
-- **Bake-time apk-fetch (v0.2 — air-gap)** — `apk_fetch: true`
-  in YAML / `--apk-fetch` on CLI pulls every `packages:` entry
-  + recursive deps from upstream Alpine at BAKE time via
-  apk-tools-static (auto-downloaded to `~/.cache/pi-bake/`),
-  stages .apk files into FAT at `/apks/<arch>/extras/`. First-
-  boot install runs offline (`apk add --no-network
-  --allow-untrusted`). Pi never needs internet. See `alpine.py`
-  + `apkfetch.py`.
+- **Bake-time apk-fetch + init-time install (v0.2 + #3)** —
+  Operator declares `packages:` in their recipe; pi-bake pulls
+  every entry + recursive deps from upstream Alpine at BAKE
+  time via apk-tools-static (auto-downloaded to
+  `~/.cache/pi-bake/`), drops the .apks into FAT at
+  `/apks/<arch>/` (flat layout alongside the stock cache),
+  regenerates `APKINDEX.tar.gz` and signs it with a fresh
+  per-bake RSA-2048 key (RSA-SHA256), and bakes the matching
+  pubkey into the apkovl at `/etc/apk/keys/pi-bake-<hex>.rsa.pub`.
+  Operator extras land in `/etc/apk/world` so init installs them
+  AT INIT TIME alongside the baseline — one transaction, no
+  late-boot `local.d` script. By the time sshd is reachable,
+  the Pi is fully provisioned. See `alpine.py` + `apkfetch.py`
+  + `design/#3_study.md`.
+
+  Always-on whenever `packages:` is non-empty. The `apk_fetch:`
+  YAML field is a DEPRECATED no-op (silently accepted for old
+  recipes); the `--apk-fetch` CLI flag is gone.
 - **Pre-baked SSH host keys (v0.2)** — `ssh_host_key: <path>`
   in YAML / `--ssh-host-key PATH` on CLI bakes the operator's
   ed25519/rsa/ecdsa pair (private from PATH, public from
@@ -77,15 +87,12 @@ just bolt it on.
 
 ### Known constraints
 
-- **Bake-time apk-fetch installs extras POST-sshd** — first-
-  boot install runs from `local.d` (after `default` runlevel
-  comes up). For appliances that need extras installed BEFORE
-  sshd starts (e.g. firmware blobs loaded before networking),
-  init-time install via signed APKINDEX is a v0.3+ ROADMAP item.
-  The boot flow analysis is in `apkfetch.py`'s docstring.
-- **No HAT catalog / config.txt overlay machinery** — operators
-  who need a HAT-specific `dtoverlay=` edit `config.txt`
-  manually post-bake or via pyinfra. v0.3 ROADMAP item.
+- **`--pibakehub` not yet wired into the CLI** — pibakehub
+  fragments exist in `pibakehub-pilot/` and a composition
+  prototype lives at `tools/pibakehub_compose.py`, but the
+  build path doesn't consume them yet. ROADMAP item #7.
+- **No Raspbian/Fedora/Debian backend** — Alpine only at the
+  moment. ROADMAP items #9/#10/#11.
 
 ## Critical lessons from real-hardware deployment
 
@@ -107,19 +114,21 @@ linux-firmware-intel, etc.
 ENTIRE transaction fails — including dhcpcd.** Result: no DHCP,
 no sshd, 169.x APIPA, unreachable device.
 
-**Pi-bake's split (v0.0.9+):**
+**Pi-bake's solution (since #3):**
 
-- `/etc/apk/world` holds ONLY the baseline (everything in stock
-  cache). First-boot apk-add succeeds wholesale.
-- Operator-declared extras (`packages:` in YAML) → `/etc/local.d/
-  install-extras.start`. Runs at boot via OpenRC `local` (last
-  in default runlevel), AFTER dhcpcd has brought the network up.
-  Two flavors:
-  - Default (`apk_fetch: false`): `apk update && apk add <extras>`
-    online. Pi needs internet on first boot.
-  - `apk_fetch: true` (v0.2): bake pulled .apks into FAT at
-    `/apks/<arch>/extras/`. Script does `apk add --no-network
-    --allow-untrusted <files>`. Pi never needs internet.
+- Operator extras + recursive deps are fetched at BAKE time
+  into `/apks/<arch>/` (flat, alongside stock cache).
+- `APKINDEX.tar.gz` is regenerated to list everything + signed
+  with a per-bake RSA-SHA256 key.
+- The matching pubkey lands in the apkovl's `/etc/apk/keys/`.
+- ALL packages (baseline + extras) go into `/etc/apk/world` —
+  init's `apk add --no-network` installs everything in one
+  transaction at INIT TIME.
+
+By the time sshd starts, the Pi is fully provisioned — no
+late-boot `local.d` script, no two-paths design. The
+wholesale-fail rule is satisfied because every world entry is
+in the cache AND in the (signed) index.
 - Self-disables on success via `/var/lib/pi-bake/install-extras.done`.
 
 Trade-off: extras still need network on first boot. v0.3

@@ -47,8 +47,10 @@ import gzip
 import logging
 import os
 import platform
+import secrets
 import shutil
 import subprocess
+import tarfile
 from pathlib import Path
 
 from pi_bake.download import cache_dir, fetch
@@ -227,3 +229,163 @@ def fetch_packages(
     LOG.info("apk fetch: %d apk file(s) → %s",
              len(fetched), out_dir)
     return fetched
+
+
+# --------------------------------------------------------------------------- #
+# Signing key + APKINDEX regen (init-time install — see design/#3_study.md)   #
+# --------------------------------------------------------------------------- #
+
+
+def make_signing_key(workdir: Path) -> tuple[Path, Path, str]:
+    """Generate a fresh RSA-2048 signing keypair for the APKINDEX.
+
+    The pi-bake convention is `pi-bake-<8hex>.rsa.pub` for the
+    public key filename — matches Alpine's
+    `<email>-<8hex>.rsa.pub` shape. The matching private key sits
+    alongside it in `workdir` with the `.pub` stripped.
+
+    Returns `(privkey_path, pubkey_path, pubkey_filename)`. The
+    pubkey filename is what gets referenced inside the signed
+    APKINDEX's `.SIGN.RSA.<name>` member and what we drop into
+    the apkovl at `/etc/apk/keys/<name>` so init's `apk add`
+    trusts our signature.
+    """
+    if shutil.which("openssl") is None:
+        raise RuntimeError(
+            "openssl not on PATH; required for APKINDEX signing. "
+            "Install: dnf install openssl  /  apt install openssl"
+        )
+    workdir.mkdir(parents=True, exist_ok=True)
+    pubkey_name = f"pi-bake-{secrets.token_hex(4)}.rsa.pub"
+    pubkey = workdir / pubkey_name
+    privkey = workdir / pubkey_name[:-4]   # strip ".pub"
+    subprocess.run(
+        ["openssl", "genrsa", "-out", str(privkey), "2048"],
+        check=True, capture_output=True, text=True,
+    )
+    subprocess.run(
+        ["openssl", "rsa", "-in", str(privkey), "-pubout",
+         "-out", str(pubkey)],
+        check=True, capture_output=True, text=True,
+    )
+    privkey.chmod(0o600)
+    LOG.info("APKINDEX signing key: %s", pubkey_name)
+    return privkey, pubkey, pubkey_name
+
+
+def regen_signed_index(
+    *,
+    apk_static: Path,
+    apks_dir: Path,
+    privkey: Path,
+    pubkey_name: str,
+) -> None:
+    """Regenerate `apks_dir/APKINDEX.tar.gz` over every .apk in
+    `apks_dir`, signed by `privkey` and referencing `pubkey_name`.
+
+    Replaces the existing (alpine-devel-signed) index with a
+    pi-bake-signed one. apk-tools verifies APKINDEX signatures
+    against whatever pubkeys are in `--keys-dir`; the matching
+    pubkey lands in the apkovl's `/etc/apk/keys/` so init's
+    `apk add --root $sysroot` accepts our index.
+
+    The .apk files themselves are unchanged — they retain their
+    upstream alpine-devel-signed bodies. apk-tools verifies each
+    file's INTERNAL signature against alpine-devel keys (already
+    in $sysroot/etc/apk/keys via init's `cp -a` from initramfs).
+    Our key only signs the INDEX listing.
+
+    Signed APKINDEX.tar.gz format (per apk-tools / abuild-sign):
+        gzip-stream-1: tar containing one file
+                        `.SIGN.RSA256.<pubkey_name>` whose body
+                        is the openssl RSA-SHA256 signature of
+                        gzip-stream-2. (apk-tools also accepts
+                        `.SIGN.RSA.<name>` for legacy RSA-SHA1
+                        signatures, but modern OpenSSL 3.x
+                        refuses to produce SHA-1 RSA signatures
+                        by default — security policy. SHA-256
+                        is fine; apk-tools 2.6+ supports it.)
+        gzip-stream-2: tar containing `APKINDEX` (plain-text
+                        package metadata).
+        Concatenated as multi-stream gzip (GNU tar reads this
+        transparently).
+    """
+    if shutil.which("openssl") is None:
+        raise RuntimeError("openssl not on PATH; can't sign index")
+
+    apk_files = sorted(p for p in apks_dir.iterdir()
+                       if p.suffix == ".apk")
+    if not apk_files:
+        raise RuntimeError(f"no .apk files in {apks_dir}")
+
+    # Step 1. Build the unsigned index. apk index reads each
+    # .apk's metadata and tries to verify each file's embedded
+    # signature; we pass --allow-untrusted because Alpine ships
+    # .apks signed with RSA-SHA1 and modern apk-tools-static
+    # (built against new OpenSSL) refuses to verify SHA-1 RSA
+    # signatures. This is safe: we're not installing anything
+    # here, just building an INDEX. The .apks' alpine-devel
+    # signatures DO get verified later — by init's apk add on
+    # the Pi, which runs the older apk-tools bundled in the
+    # Alpine RPi initramfs (that does trust SHA-1 RSA for
+    # legacy compat). --no-warnings suppresses "no description"
+    # chatter for our extras.
+    unsigned = apks_dir / ".APKINDEX.unsigned.tar.gz"
+    cmd = [str(apk_static), "index", "--no-warnings",
+           "--allow-untrusted",
+           "-o", str(unsigned)] + [str(p) for p in apk_files]
+    LOG.info("apk index: %d .apks → %s",
+             len(apk_files), unsigned.name)
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError(
+            f"apk index failed (rc={r.returncode}):\n"
+            f"--- stdout ---\n{r.stdout}\n"
+            f"--- stderr ---\n{r.stderr}"
+        )
+
+    # Step 2. RSA-SHA256 sign the unsigned tar.gz with openssl.
+    # SHA-256, not SHA-1 — modern OpenSSL 3.x refuses RSA-SHA1.
+    # apk-tools 2.6+ accepts .SIGN.RSA256.<name> for SHA-256.
+    sig_bin = apks_dir / ".APKINDEX.sig"
+    subprocess.run(
+        ["openssl", "dgst", "-sha256", "-sign", str(privkey),
+         "-out", str(sig_bin), str(unsigned)],
+        check=True, capture_output=True, text=True,
+    )
+
+    # Step 3. Wrap the signature in a one-file tar (member name
+    # ".SIGN.RSA256.<pubkey_name>") then gzip it. Member metadata
+    # set to deterministic values so the resulting bytes are
+    # reproducible.
+    sig_blob = sig_bin.read_bytes()
+    sig_tar_gz = apks_dir / ".APKINDEX.sig.tar.gz"
+    # gzip.GzipFile (not open()) lets us pass mtime=0 for
+    # reproducible signature stream bytes across bakes of the
+    # same recipe.
+    with open(sig_tar_gz, "wb") as raw:
+        gz = gzip.GzipFile(filename="", fileobj=raw, mode="wb",
+                           compresslevel=9, mtime=0)
+        with tarfile.open(fileobj=gz, mode="w|") as tf:
+            member = tarfile.TarInfo(name=f".SIGN.RSA256.{pubkey_name}")
+            member.size = len(sig_blob)
+            member.mode = 0o644
+            member.uid = 0
+            member.gid = 0
+            member.mtime = 0
+            import io as _io
+            tf.addfile(member, _io.BytesIO(sig_blob))
+        gz.close()
+
+    # Step 4. Concatenate signature stream + unsigned index →
+    # signed APKINDEX.tar.gz (overwrites whatever was there).
+    signed = apks_dir / "APKINDEX.tar.gz"
+    with open(signed, "wb") as out:
+        for piece in (sig_tar_gz, unsigned):
+            out.write(piece.read_bytes())
+
+    # Tidy intermediates.
+    for f in (unsigned, sig_bin, sig_tar_gz):
+        f.unlink()
+    LOG.info("APKINDEX signed: %s (%d bytes)",
+             signed, signed.stat().st_size)

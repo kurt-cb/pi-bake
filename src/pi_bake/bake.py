@@ -32,18 +32,22 @@ def build(
     node: NodeConfig, out_path: str | Path,
     image_size_mb: int | None = None,
     extra_packages: list[str] | None = None,
-    apk_fetch: bool = False,
+    apk_fetch: bool = True,  # DEPRECATED — always-on; kept for back-compat
 ) -> Path:
     """Build an `.img.gz` for `(board, os, version, node)`.
 
     `version=None` → use the OS's latest known-good.
     `image_size_mb=None` → backend's default.
-    `extra_packages` → list of apk package names appended to
-        `/etc/apk/world` (Alpine only). Default install path
-        requires network on first boot.
-    `apk_fetch` (Alpine only) → if True, fetch extras + recursive
-        deps at BAKE time so the Pi can install them offline on
-        first boot. Default False (preserves v0.0.9 behavior).
+    `extra_packages` → list of apk package names. When set,
+        pi-bake fetches them + recursive deps at bake time,
+        regenerates + signs the FAT-resident APKINDEX, and adds
+        them to `/etc/apk/world` so init installs them at init
+        time. Offline first boot guaranteed.
+
+    `apk_fetch` is a DEPRECATED no-op; always-on whenever
+    `extra_packages` is non-empty. Kept in the signature for
+    backward compatibility with old call sites; will be removed
+    once nobody references it.
 
     Raises:
       - KeyError on unknown board/os.
@@ -80,7 +84,6 @@ def build(
             "alpine_branch": alpine_branch,
             "extra_packages": extra_packages,
             "arch": b.arch,
-            "apk_fetch": apk_fetch,
         }
         if image_size_mb is not None:
             kwargs["image_size_mb"] = image_size_mb
