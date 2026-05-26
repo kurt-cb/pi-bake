@@ -21,6 +21,7 @@ versions get assigned at tag time, not here.
 | 13 |  ⬜   | [Interactive mode (`--interactive` wizard)](#13-interactive-mode) |
 | 14 |  ⬜   | [Dynamic upstream version discovery](#14-dynamic-version-discovery) |
 | 15 |  ⏸   | [Generalized recovery layer (waits for 2nd downstream asker)](#15-generalized-recovery-layer) |
+| 16 |  ⬜   | [Operator-controlled FAT contents (extended backups, scratch)](#16-operator-controlled-fat-contents) |
 
 **State key:** ✅ shipped · 🚧 in flight · 🔴 blocked (on another item) · ⬜ not started · ⏸ deferred (won't pick up without more signal)
 
@@ -245,6 +246,14 @@ the air-gap use case for most operators.
 No new operator burden: same `packages: [...]` + `apk_fetch:
 true` recipe, just installs at a different moment.
 
+**FAT size is NOT a constraint here.** pi-bake creates the FAT
+from scratch via `mformat` and the operator controls its size
+through `output.image_size_mb`. The "stock cache is small"
+phrasing in earlier notes only described what Alpine *ships*
+upstream (~150 packages); pi-bake can put as many .apks in
+`/apks/<arch>/` as fits in the operator-chosen FAT. See also
+#16 for operator-managed FAT contents beyond .apks.
+
 ---
 
 ## 9. Raspbian backend
@@ -363,6 +372,49 @@ abstraction is informed by more than one workflow.
 
 Totaldns workaround in the meantime: recovery layer lives in
 their `safe_reboot.py` deploy role.
+
+---
+
+## 16. Operator-controlled FAT contents
+**⬜ not started**
+
+pi-bake creates the FAT image at whatever size the operator
+specifies (`output.image_size_mb`), then fills it with the
+Alpine tarball + apkovl + (when `apk_fetch: true`) the staged
+.apks/extras/. Everything else on the FAT is operator-
+inaccessible at bake time.
+
+The FAT is `vfat`, world-readable on the Pi at
+`/media/mmcblk0/`, world-writable with a `mount -o remount,rw`.
+Operators with a 4 GB+ SD card have plenty of room for things
+beyond the bake-time set:
+
+- **Extended backups.** `lbu` rotates 3 apkovls today
+  (`BACKUP_LIMIT=3` per #2's pre-existing config). With a
+  larger FAT, the operator could bump that to 30, or keep
+  hand-rolled snapshot tarballs alongside.
+- **Recovery payloads.** Frozen "factory" apkovl + a console
+  fixit script (see #15 for the generalized form). With a big
+  FAT there's no question whether they fit.
+- **Pre-staged operator data.** Config templates, firmware
+  blobs not in upstream Alpine, on-device asset bundles.
+
+Schema sketch:
+
+```yaml
+output:
+  path: ~/sdcards/td-pi5-1.img.gz
+  image_size_mb: 4096
+  fat_files:                          # NEW
+    - source: ~/operator/recovery/factory.apkovl.tar.gz.frozen
+      dest: /recovery/factory.apkovl.tar.gz.frozen
+    - source: ~/operator/templates/
+      dest: /templates/               # whole tree
+```
+
+#12 already lists `fat_files:` as a schema-implied-but-not-
+honored field; #16 is the explicit feature with a concrete use
+case (operator-managed FAT contents at any size).
 
 ---
 
