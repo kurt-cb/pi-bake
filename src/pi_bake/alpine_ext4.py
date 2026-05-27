@@ -237,6 +237,14 @@ def bake(
                 packages=pkgs,
             )
 
+            # 1.5. Recreate busybox applet symlinks. The bootstrap
+            # used --no-scripts (cross-arch safety), which skipped
+            # busybox's post-install hook that creates /sbin/init,
+            # /bin/sh, and ~302 other symlinks to /bin/busybox.
+            # Without /sbin/init the kernel panics at userspace
+            # exec → fix this BEFORE the system has to boot.
+            _install_busybox_symlinks(root_mnt)
+
             # 2. Move /boot contents from rootfs onto the FAT
             # partition. raspberrypi-bootloader writes its files
             # into the rootfs's /boot dir; the Pi bootloader reads
@@ -362,6 +370,69 @@ def _format_partitions(raw_img: Path) -> None:
 # --------------------------------------------------------------------------- #
 # Bootstrap: apk-tools-static --no-scripts install                             #
 # --------------------------------------------------------------------------- #
+
+def _install_busybox_symlinks(root_mnt: Path) -> None:
+    """Recreate the busybox applet symlinks that `apk add --no-scripts`
+    skipped at bootstrap time.
+
+    On Alpine, `/sbin/init`, `/bin/sh`, `/sbin/reboot`, etc. (~304
+    paths total) are symlinks to `/bin/busybox`. They're created at
+    package install time by busybox's `.post-install` script which
+    runs `busybox --install -s`. We can't execute aarch64 busybox on
+    an x86_64 bake host (would require qemu-user-static), so we
+    replicate the symlink creation in Python.
+
+    The applet manifest is at `/etc/busybox-paths.d/busybox` inside
+    the bootstrapped rootfs — a plain-text list of relative paths
+    (one per line), shipped by the busybox apk itself, that lists
+    every applet path. We iterate it and `ln -s /bin/busybox` to
+    each. Idempotent: skips if a file/symlink already exists at the
+    target path.
+
+    Without this step the kernel boots, mounts root, then panics with
+    "Cannot find init" — observed firsthand 2026-05-27 bake test.
+    """
+    manifest = root_mnt / "etc" / "busybox-paths.d" / "busybox"
+    if not manifest.is_file():
+        raise RuntimeError(
+            f"busybox manifest missing: {manifest}. The busybox apk "
+            f"didn't install correctly — check the `apk add` output."
+        )
+    n_created = 0
+    n_skipped = 0
+    for rel_path in manifest.read_text().splitlines():
+        rel_path = rel_path.strip()
+        if not rel_path or rel_path.startswith("#"):
+            continue
+        target = root_mnt / rel_path
+        # Skip if anything already lives at the target path (file,
+        # symlink, or directory). Other apks may have shipped real
+        # binaries at these paths.
+        if target.exists() or target.is_symlink():
+            n_skipped += 1
+            continue
+        # Ensure parent dir exists; some applet paths live in
+        # /usr/sbin etc. that the bootstrap may not have created.
+        # Native Python ops work fine: in the bake we're root in
+        # the LXC and own the mounted ext4 root; in tests the
+        # caller owns the temp dir.
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.symlink_to("/bin/busybox")
+        n_created += 1
+    LOG.info(
+        "busybox symlinks: %d created (incl. /sbin/init), %d skipped",
+        n_created, n_skipped,
+    )
+    # Final sanity: /sbin/init MUST exist now or boot will panic.
+    if not (root_mnt / "sbin" / "init").is_symlink() and not (
+        root_mnt / "sbin" / "init"
+    ).is_file():
+        raise RuntimeError(
+            "/sbin/init still missing after busybox symlink install — "
+            "manifest may have an unexpected format. Check the manifest "
+            "at /etc/busybox-paths.d/busybox."
+        )
+
 
 def _bootstrap_alpine(
     *, root_mnt: Path, arch: str, bootstrap_branch: str,

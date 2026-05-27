@@ -7,6 +7,7 @@ following the test_apkfetch.py convention.
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import pytest
 
@@ -136,3 +137,119 @@ def test_bake_rejects_image_size_too_small(tmp_path):
             node=node, out_path=tmp_path / "out.img.xz",
             image_size_mb=100,
         )
+
+
+# --------------------------------------------------------------------------- #
+# busybox symlink replication (regression — 2026-05-27 boot failure)            #
+#                                                                              #
+# Bug: `apk add --no-scripts` skipped busybox's post-install hook              #
+# (`busybox --install -s`), so /sbin/init etc. weren't created.                #
+# Kernel boots, mounts root, then panics "Cannot find init".                   #
+# --------------------------------------------------------------------------- #
+
+
+def test_install_busybox_symlinks_creates_sbin_init(tmp_path):
+    """The critical regression: /sbin/init must be a symlink to
+    /bin/busybox after _install_busybox_symlinks runs."""
+    # Build a fake root that looks like what apk add --no-scripts
+    # produces: /bin/busybox exists + /etc/busybox-paths.d/busybox
+    # manifest lists the symlink paths.
+    root = tmp_path / "rootfs"
+    (root / "bin").mkdir(parents=True)
+    (root / "bin" / "busybox").write_bytes(b"fake-busybox-binary")
+    (root / "etc" / "busybox-paths.d").mkdir(parents=True)
+    manifest = root / "etc" / "busybox-paths.d" / "busybox"
+    # Minimal but realistic — these are the most critical applets.
+    manifest.write_text(
+        "busybox\n"           # already exists, should skip
+        "sbin/init\n"         # THE one — without this kernel panics
+        "bin/sh\n"
+        "sbin/reboot\n"
+        "sbin/poweroff\n"
+        "\n"                   # blank line, should skip
+        "# comment\n"          # comment, should skip
+        "usr/bin/awk\n"
+    )
+
+    alpine_ext4._install_busybox_symlinks(root)
+
+    # The critical one: /sbin/init exists + points at /bin/busybox.
+    sbin_init = root / "sbin" / "init"
+    assert sbin_init.is_symlink(), \
+        "/sbin/init must be a symlink (regression — 2026-05-27 boot failure)"
+    assert sbin_init.readlink() == Path("/bin/busybox")
+    # Other applets follow the same pattern.
+    assert (root / "bin" / "sh").is_symlink()
+    assert (root / "sbin" / "reboot").is_symlink()
+    assert (root / "sbin" / "poweroff").is_symlink()
+    assert (root / "usr" / "bin" / "awk").is_symlink()
+    # The existing /bin/busybox is NOT replaced.
+    assert not (root / "bin" / "busybox").is_symlink()
+    assert (root / "bin" / "busybox").read_bytes() == b"fake-busybox-binary"
+
+
+def test_install_busybox_symlinks_creates_parent_dirs(tmp_path):
+    """Applet paths like usr/sbin/X land in dirs the bootstrap may
+    not have created — _install_busybox_symlinks mkdirs as needed."""
+    root = tmp_path / "rootfs"
+    (root / "bin").mkdir(parents=True)
+    (root / "bin" / "busybox").write_bytes(b"x")
+    (root / "etc" / "busybox-paths.d").mkdir(parents=True)
+    # sbin/init is required by the function's final sanity check;
+    # the test's main interest is the unusual nested path.
+    (root / "etc" / "busybox-paths.d" / "busybox").write_text(
+        "sbin/init\n"
+        "usr/sbin/totally-new-dir/applet\n"
+    )
+
+    alpine_ext4._install_busybox_symlinks(root)
+
+    target = root / "usr" / "sbin" / "totally-new-dir" / "applet"
+    assert target.is_symlink()
+    # Parent dir got mkdir -p'd as needed.
+    assert (root / "usr" / "sbin" / "totally-new-dir").is_dir()
+
+
+def test_install_busybox_symlinks_idempotent(tmp_path):
+    """Re-running shouldn't barf if the symlinks already exist
+    (e.g. partial bake retry)."""
+    import os
+    root = tmp_path / "rootfs"
+    (root / "bin").mkdir(parents=True)
+    (root / "bin" / "busybox").write_bytes(b"x")
+    (root / "etc" / "busybox-paths.d").mkdir(parents=True)
+    (root / "etc" / "busybox-paths.d" / "busybox").write_text("sbin/init\n")
+    # Pre-create the symlink so the second run sees it exists.
+    (root / "sbin").mkdir()
+    os.symlink("/bin/busybox", root / "sbin" / "init")
+
+    # Should not raise.
+    alpine_ext4._install_busybox_symlinks(root)
+
+    # Symlink still points where we expect.
+    assert (root / "sbin" / "init").readlink() == Path("/bin/busybox")
+
+
+def test_install_busybox_symlinks_fails_without_manifest(tmp_path):
+    """Missing manifest = something went wrong with the apk bootstrap;
+    bail loudly rather than producing a broken image."""
+    root = tmp_path / "rootfs"
+    (root / "bin").mkdir(parents=True)
+    (root / "bin" / "busybox").write_bytes(b"x")
+    # No /etc/busybox-paths.d/busybox.
+    with pytest.raises(RuntimeError, match="busybox manifest missing"):
+        alpine_ext4._install_busybox_symlinks(root)
+
+
+def test_install_busybox_symlinks_fails_if_sbin_init_not_in_manifest(tmp_path):
+    """If the manifest somehow ships without /sbin/init listed, the
+    boot would still panic. Sanity-check at the end of the function
+    catches that before we produce a doomed image."""
+    root = tmp_path / "rootfs"
+    (root / "bin").mkdir(parents=True)
+    (root / "bin" / "busybox").write_bytes(b"x")
+    (root / "etc" / "busybox-paths.d").mkdir(parents=True)
+    # No /sbin/init in the manifest.
+    (root / "etc" / "busybox-paths.d" / "busybox").write_text("bin/sh\n")
+    with pytest.raises(RuntimeError, match="/sbin/init still missing"):
+        alpine_ext4._install_busybox_symlinks(root)
