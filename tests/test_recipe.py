@@ -634,3 +634,96 @@ def test_os_mode_diskless_default_not_threaded():
     )
     _, build_kwargs = recipe_to_node_config(r)
     assert "os_mode" not in build_kwargs
+
+
+# --------------------------------------------------------------------------- #
+# os_mode: pxe + pxe.server_url validation                                     #
+# --------------------------------------------------------------------------- #
+
+
+def test_pxe_loads_yaml(tmp_path):
+    body = _minimal_yaml() + """
+os_mode: pxe
+pxe:
+  server_url: http://192.168.4.2/td-cm4
+"""
+    r = _write_and_load(tmp_path, body)
+    assert r.os_mode == "pxe"
+    assert r.pxe.server_url == "http://192.168.4.2/td-cm4"
+
+
+def test_pxe_strips_trailing_slash(tmp_path):
+    body = _minimal_yaml() + """
+os_mode: pxe
+pxe:
+  server_url: http://192.168.4.2/td-cm4/
+"""
+    r = _write_and_load(tmp_path, body)
+    # Trailing slash stripped by PxeSpec.__post_init__ so cmdline.txt
+    # templates concat predictably.
+    assert r.pxe.server_url == "http://192.168.4.2/td-cm4"
+
+
+def test_pxe_invalid_url_scheme_rejected(tmp_path):
+    body = _minimal_yaml() + """
+os_mode: pxe
+pxe:
+  server_url: ftp://lab/td-cm4
+"""
+    with pytest.raises(ValueError, match="http://"):
+        _write_and_load(tmp_path, body)
+
+
+def test_pxe_without_server_url_rejected(tmp_path):
+    body = _minimal_yaml() + "os_mode: pxe\n"
+    with pytest.raises(ValueError, match="server_url"):
+        _write_and_load(tmp_path, body)
+
+
+def test_pxe_server_url_without_pxe_mode_rejected(tmp_path):
+    body = _minimal_yaml() + """
+pxe:
+  server_url: http://lab/td-cm4
+"""
+    with pytest.raises(ValueError, match="pxe.* only meaningful"):
+        _write_and_load(tmp_path, body)
+
+
+def test_pxe_unknown_subkey_rejected(tmp_path):
+    body = _minimal_yaml() + """
+os_mode: pxe
+pxe:
+  server_url: http://lab/td-cm4
+  endpoint: typo-here
+"""
+    with pytest.raises(ValueError, match="unknown key"):
+        _write_and_load(tmp_path, body)
+
+
+def test_pxe_threaded_to_build_kwargs():
+    from pi_bake.recipe import PxeSpec
+    r = Recipe(
+        hostname="t", board="pi-5", os="alpine",
+        os_mode="pxe",
+        pxe=PxeSpec(server_url="http://lab/td-cm4"),
+        ssh_pubkey=_PUBKEY,
+        output=OutputSpec(path="/tmp/td-cm4-tftp"),
+    )
+    _, build_kwargs = recipe_to_node_config(r)
+    assert build_kwargs.get("os_mode") == "pxe"
+    assert build_kwargs.get("pxe_server_url") == "http://lab/td-cm4"
+
+
+def test_pxe_round_trip(tmp_path):
+    from pi_bake.recipe import PxeSpec
+    r1 = Recipe(
+        hostname="td-cm4", board="pi-5", os="alpine",
+        os_mode="pxe",
+        pxe=PxeSpec(server_url="http://192.168.4.2/td-cm4"),
+        ssh_pubkey=_PUBKEY,
+        output=OutputSpec(path="/tmp/td-cm4-tftp"),
+    )
+    p = tmp_path / "pxe.yaml"
+    p.write_text(dump_recipe(r1))
+    r2 = load_recipe(p)
+    assert r2 == r1

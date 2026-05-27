@@ -74,6 +74,20 @@ the v0.2.1–v0.2.6 work for archaeology.
   RPi edge tarball and modloop-on-FAT makes post-boot kernel
   upgrade an awkward ritual. See `alpine_ext4.py` + `examples/
   pi-5-alpine-ext4.yaml`. Outputs `.img.xz` (not `.img.gz`).
+- **Alpine PXE baker (`os_mode: pxe`, v0.3.2+)** — no-sudo bake
+  that produces a per-host TFTP+HTTP boot tree (a directory, not
+  an .img file). Recipe gets a new `pxe.server_url:` field with
+  the lab host's HTTP base URL. Output: bootcode/kernel/initramfs/
+  DTBs (TFTP-served) + apkovl + signed apks cache (HTTP-served
+  via nginx, see `ngnix_setup.md`). cmdline.txt has `ip=dhcp` +
+  `apkovl=URL` + `alpine_repo=URL`; init script in stock Alpine
+  RPi initramfs handles the HTTP fetches. Kernel's `BCMGENET=y`
+  built-in means no initramfs rebuild needed. Operator drops the
+  baked tree into `/var/lib/tftpboot/<cm4-mac>/`. See
+  `alpine_pxe.py` + `examples/pi-cm4-alpine-pxe.yaml`. The apkovl
+  gets `auto eth0 inet dhcp` explicit (via _write_apkovl's
+  `explicit_eth0_dhcp=True`) — proven hands-on that dhcpcd alone
+  isn't enough in pure-PXE; networking+dhcpcd-together works.
 - **Raspbian + Debian backends** — losetup-based, REQUIRES SUDO
   (or run inside a privileged LXC container). Same NodeConfig +
   YAML schema as Alpine; `os: raspbian` or `os: debian` swaps

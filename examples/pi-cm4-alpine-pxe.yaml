@@ -1,0 +1,64 @@
+# CM4 (aarch64) — Alpine PXE recovery tree. NOT an SD-card image.
+#
+# Output is a directory (not an .img.xz) you copy to the lab host's
+# TFTP root keyed by the CM4's MAC:
+#   /var/lib/tftpboot/<cm4-mac>/
+# The same directory is also served over HTTP via nginx — see
+# ngnix_setup.md for the lab-side prereqs.
+#
+# When to pick `os_mode: pxe`:
+#   - SD card died and you need to boot the CM4 anyway (recovery).
+#   - You want an SD-less lab setup where every device PXE-boots.
+#   - You're prepping to do an EEPROM update + need a working
+#     environment to run rpi-eeprom from (in which case ALSO pull
+#     the rpi-eeprom apk into packages: below).
+#
+# How the CM4 actually boots when this tree is deployed:
+#   1. Pi firmware (in CM4 EEPROM) DHCPs for an IP + downloads
+#      config.txt + kernel + initramfs from TFTP.
+#   2. Kernel boots; initramfs reads cmdline.txt's `ip=dhcp`,
+#      brings up eth0 via genet (built into linux-rpi kernel).
+#   3. initramfs's init script wget-fetches `apkovl=URL` from nginx.
+#   4. apk add (in init) installs the world from `alpine_repo=URL`,
+#      also via nginx.
+#   5. switch_root, openrc starts services (sshd + dhcpcd + chronyd
+#      + networking), system reachable.
+#
+# Prereqs on the lab host (one-time, see docs):
+#   - dnsmasq serving DHCP + TFTP on the lab subnet
+#   - nginx serving the TFTP root over HTTP (ngnix_setup.md)
+#   - CM4's EEPROM boot order set to network-first
+
+hostname: td-cm4
+board: pi-5         # CM4 uses the same linux-rpi catalog entry
+os: alpine
+os_mode: pxe
+os_version: 3.21.4
+
+ssh_pubkey: ~/.ssh/totaldns-adhoc.pub
+
+pxe:
+  # Base HTTP URL nginx serves the baked tree at on the lab host.
+  # pi-bake substitutes this into cmdline.txt's `apkovl=` and
+  # `alpine_repo=` params. NOTE: must NOT include the `apks/<arch>/`
+  # suffix — apk's repo fetcher appends `/<arch>/APKINDEX.tar.gz`
+  # itself, and a doubled-up path 404s.
+  server_url: http://192.168.4.2/td-cm4
+
+# Pure-PXE DHCP (the apkovl gets an `auto eth0 inet dhcp` block
+# automatically — see the alpine_pxe backend; dhcpcd alone isn't
+# reliable enough in pure-PXE).
+network:
+  mode: dhcp
+  send_hostname: true
+
+# Optional extras to bake into the apks tree (same machinery as the
+# diskless backend's #3 init-time install). Useful for shipping
+# rpi-eeprom or other tools needed for the recovery workflow.
+# packages:
+#   - rpi-eeprom
+
+output:
+  # Output is a DIRECTORY (pxe mode) — operator copies its contents
+  # into /var/lib/tftpboot/<cm4-mac>/ on the lab host.
+  path: ~/pibake-tftp/td-cm4

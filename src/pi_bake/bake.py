@@ -33,6 +33,7 @@ def build(
     image_size_mb: int | None = None,
     extra_packages: list[str] | None = None,
     os_mode: str = "",
+    pxe_server_url: str = "",
     apk_fetch: bool = True,  # DEPRECATED — always-on; kept for back-compat
 ) -> Path:
     """Build an `.img.gz` for `(board, os, version, node)`.
@@ -107,6 +108,23 @@ def build(
                 alpine_version=resolved_version,
                 extra_packages=extra_packages,
                 image_size_mb=image_size_mb,
+            )
+        if os_mode == "pxe":
+            if not pxe_server_url:
+                raise ValueError(
+                    "os_mode: pxe requires pxe_server_url (the lab HTTP "
+                    "base URL). Set it in the recipe under `pxe.server_url:` "
+                    "or pass --pxe-server-url on the CLI."
+                )
+            from pi_bake import alpine_pxe
+            minor = ".".join(resolved_version.split(".")[:2])
+            alpine_branch = f"v{minor}"
+            return alpine_pxe.bake(
+                url=url, node=node, out_path=Path(out_path),
+                alpine_branch=alpine_branch,
+                extra_packages=extra_packages,
+                arch=b.arch,
+                pxe_server_url=pxe_server_url,
             )
         # diskless (default) — original alpine backend, RPi tarball.
         # Edge selection was already rejected at recipe load for

@@ -161,12 +161,14 @@ def _cmd_build(args: argparse.Namespace) -> int:
         # Build a Recipe so --to-yaml can serialize it AND the
         # downstream NodeConfig is constructed via the same path
         # the YAML loader uses (no duplicate field plumbing).
+        from pi_bake.recipe import PxeSpec
         recipe = Recipe(
             hostname=args.hostname,
             board=args.board,
             os=args.os_name,
             os_version=args.version or "",
             os_mode=args.os_mode or "",
+            pxe=PxeSpec(server_url=args.pxe_server_url or ""),
             timezone=args.timezone,
             ssh_pubkey=args.ssh_pubkey or pubkey,
             extra_pubkeys=list(args.extra_pubkey or []),
@@ -231,10 +233,20 @@ def _cmd_build(args: argparse.Namespace) -> int:
         print(f"error: {e}", file=sys.stderr)
         return 1
 
-    print(f"wrote {out} ({out.stat().st_size >> 20} MB)")
-    print(f"flash with:")
-    print(f"  zcat {out} | sudo dd of=/dev/mmcblkN bs=4M status=progress")
-    print(f"  (or rpi-imager → 'Use Custom Image')")
+    if out.is_dir():
+        # pxe mode — output is a TFTP+HTTP boot tree, not an image
+        size_mb = sum(p.stat().st_size for p in out.rglob("*") if p.is_file()) >> 20
+        print(f"wrote {out}/ ({size_mb} MB across {sum(1 for _ in out.rglob('*'))} files)")
+        print(f"deploy to lab host: rsync -a {out}/ <lab-host>:/var/lib/tftpboot/<cm4-mac>/")
+        print(f"  (operator's HTTP server — see ngnix_setup.md — should also serve this tree)")
+    else:
+        print(f"wrote {out} ({out.stat().st_size >> 20} MB)")
+        print(f"flash with:")
+        if str(out).endswith(".xz"):
+            print(f"  xzcat {out} | sudo dd of=/dev/mmcblkN bs=4M status=progress conv=fsync")
+        else:
+            print(f"  zcat {out} | sudo dd of=/dev/mmcblkN bs=4M status=progress conv=fsync")
+        print(f"  (or rpi-imager → 'Use Custom Image')")
     return 0
 
 
@@ -292,10 +304,18 @@ def _build_parser() -> argparse.ArgumentParser:
     p_b.add_argument("--os-mode", dest="os_mode", default="",
                      help="Alpine image layout: 'diskless' (default, "
                           "no-root bake, apkovl-overlay; what pi-bake "
-                          "has always done) or 'ext4' (sys-mode on a "
+                          "has always done), 'ext4' (sys-mode on a "
                           "real partitioned image, FAT /boot + ext4 /, "
-                          "requires sudo, normal `apk upgrade` works). "
+                          "requires sudo, normal `apk upgrade` works), "
+                          "or 'pxe' (TFTP-tree output for network-boot "
+                          "recovery; requires --pxe-server-url). "
                           "Ignored for non-Alpine backends.")
+    p_b.add_argument("--pxe-server-url", dest="pxe_server_url", default="",
+                     help="Base HTTP URL the lab host serves the baked "
+                          "tree at (e.g. http://192.168.4.2/td-cm4). "
+                          "Required with --os-mode pxe; substituted "
+                          "into cmdline.txt's apkovl=... and "
+                          "alpine_repo=... params.")
     p_b.add_argument("--hostname",
                      help="DNS-label-safe hostname")
     p_b.add_argument("--ssh-pubkey", metavar="PATH",

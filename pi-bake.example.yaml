@@ -56,13 +56,28 @@ output:
 
 # OS layout (Alpine only). Default `diskless` (the v0.0+ Alpine RPi
 # tarball shape — apkovl overlay + modloop squashfs on FAT, no-root
-# bake). Set to `ext4` for sys-mode Alpine on a real partitioned
-# image (FAT /boot + ext4 /); requires sudo. ext4 is the only mode
-# that supports `os_version: edge` — diskless rejects it because
-# Alpine ships no RPi edge tarball and modloop-on-FAT makes
-# post-boot kernel upgrade an awkward ritual. Ignored for non-Alpine
-# backends.
+# bake). Options:
+#   - diskless (default): SD card boot, no sudo, fast first-boot.
+#   - ext4 (v0.3.1+): sys-mode Alpine on a real partitioned image
+#     (FAT /boot + ext4 /); requires sudo. Only mode that supports
+#     `os_version: edge` — diskless rejects it because Alpine ships
+#     no RPi edge tarball and modloop-on-FAT makes post-boot kernel
+#     upgrade an awkward ritual.
+#   - pxe (v0.3.2+): produces a TFTP+HTTP boot tree (a directory,
+#     not an .img file) for network-boot recovery. No-sudo bake.
+#     Operator drops the tree into /var/lib/tftpboot/<mac>/ on the
+#     lab host; the same tree gets served over HTTP via nginx (see
+#     ngnix_setup.md). Requires `pxe.server_url:` to be set.
+# Ignored for non-Alpine backends.
 # os_mode: ext4
+
+# PXE-mode lab HTTP base URL. Required when os_mode: pxe. pi-bake
+# substitutes this into cmdline.txt's `apkovl=` and `alpine_repo=`
+# params. Must NOT include the apks/<arch> suffix — apk appends
+# `/<arch>/APKINDEX.tar.gz` itself. See examples/pi-cm4-alpine-pxe.yaml
+# for a complete pxe-mode recipe.
+# pxe:
+#   server_url: http://192.168.4.2/td-cm4
 
 # IANA timezone. Default UTC. Some clocks (Pi has no RTC) come up
 # at 1970-01-01 anyway until chrony syncs — this is only the

@@ -120,3 +120,41 @@ def test_unsupported_board_os_combo_rejected(tmp_path):
             board="pi-zero-w", os_name="raspbian", version=None,
             node=_node(), out_path=tmp_path / "out.img.xz",
         )
+
+
+def test_alpine_pxe_dispatches_to_pxe_backend(monkeypatch, tmp_path):
+    """os_mode='pxe' + pxe_server_url routes to pi_bake.alpine_pxe.bake."""
+    called = {}
+
+    def fake_pxe_bake(**kwargs):
+        called["pxe"] = kwargs
+        out = tmp_path / "pxe-tree"
+        out.mkdir(exist_ok=True)
+        return out
+
+    import pi_bake.alpine_pxe
+    monkeypatch.setattr(pi_bake.alpine_pxe, "bake", fake_pxe_bake)
+
+    bake_mod.build(
+        board="pi-5", os_name="alpine", version="3.21.4",
+        node=_node(), out_path=tmp_path / "pxe-tree",
+        os_mode="pxe", pxe_server_url="http://192.168.4.2/td-cm4",
+    )
+    assert "pxe" in called
+    assert called["pxe"]["pxe_server_url"] == "http://192.168.4.2/td-cm4"
+    # pxe dispatch DOES pass `url` (used to fetch the Alpine RPi
+    # tarball to extract — same upstream URL the diskless backend uses).
+    assert "url" in called["pxe"]
+    # alpine_branch is needed for the alpine_repo URL in cmdline.
+    assert called["pxe"]["alpine_branch"] == "v3.21"
+
+
+def test_alpine_pxe_without_server_url_rejected(tmp_path):
+    """bake.build() raises if os_mode=pxe but no pxe_server_url —
+    catches CLI users who bypass Recipe-level validation."""
+    with pytest.raises(ValueError, match="pxe_server_url"):
+        bake_mod.build(
+            board="pi-5", os_name="alpine", version="3.21.4",
+            node=_node(), out_path=tmp_path / "pxe-tree",
+            os_mode="pxe",  # no pxe_server_url
+        )

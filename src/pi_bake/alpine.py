@@ -232,6 +232,7 @@ def _write_apkovl(
     extra_packages: list[str] | None = None,
     apk_signing_pubkey_bytes: bytes = b"",
     apk_signing_pubkey_name: str = "",
+    explicit_eth0_dhcp: bool = False,
 ) -> None:
     """Build an Alpine apkovl.tar.gz for `node`.
 
@@ -397,11 +398,17 @@ def _write_apkovl(
                     node.authorized_keys_text().encode(), 0o600, False))
 
     # /etc/network/interfaces — lo is always managed by `networking`.
-    # For DHCP nodes, eth0 + wlan0 are NOT listed here: dhcpcd runs as
-    # a daemon and watches all interfaces, so listing them under
-    # `networking` would race with dhcpcd. For static-IP nodes, eth0
-    # IS listed (and dhcpcd is dropped from the runlevel entirely —
-    # see further down).
+    # For DHCP nodes (diskless), eth0 + wlan0 are NOT listed here:
+    # dhcpcd runs as a daemon and watches all interfaces, so listing
+    # them under `networking` would race with dhcpcd.
+    # For static-IP nodes, eth0 IS listed (and dhcpcd is dropped from
+    # the runlevel entirely — see further down).
+    # `explicit_eth0_dhcp=True` is for pxe mode: the apkovl is fetched
+    # via HTTP at init, and dhcpcd-as-daemon doesn't reliably bring up
+    # eth0 in time (proven 2026-05-27 hands-on). The networking
+    # service's `auto eth0` brings the link up; dhcpcd then completes
+    # the lease. The two-DHCP-clients race is benign — first reply
+    # wins, same lease either way.
     interfaces = "auto lo\niface lo inet loopback\n"
     if node.has_static_ip:
         interfaces += (
@@ -410,6 +417,11 @@ def _write_apkovl(
             f"    address {node.static_address_only}\n"
             f"    netmask {node.static_netmask}\n"
             f"    gateway {node.gateway_ipv4}\n"
+        )
+    elif explicit_eth0_dhcp:
+        interfaces += (
+            "\nauto eth0\n"
+            "iface eth0 inet dhcp\n"
         )
     members.append(("etc/network/interfaces", interfaces.encode(), 0o644, False))
 

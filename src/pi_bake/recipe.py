@@ -51,14 +51,15 @@ _TOP_KEYS = frozenset({
     "hostname", "board", "os", "os_version", "os_mode", "timezone",
     "ssh_pubkey", "extra_pubkeys", "ssh_host_key",
     "network", "wifi", "packages", "apk_fetch",
-    "config_txt", "modules", "output",
+    "config_txt", "modules", "output", "pxe",
 })
+_PXE_KEYS = frozenset({"server_url"})
 
 # Valid os_mode values per os. Empty set = mode doesn't apply
 # (backend has only one layout). "" entry is the back-compat
 # default (= "diskless" for alpine).
 _VALID_OS_MODES: dict[str, frozenset[str]] = {
-    "alpine": frozenset({"", "diskless", "ext4"}),
+    "alpine": frozenset({"", "diskless", "ext4", "pxe"}),
 }
 _NETWORK_KEYS = frozenset({"mode", "address", "gateway", "send_hostname"})
 _WIFI_KEYS    = frozenset({"ssid", "psk", "country"})
@@ -131,6 +132,32 @@ class OutputSpec:
     def __post_init__(self) -> None:
         if not self.path:
             raise ValueError("output.path is required")
+
+
+@dataclass
+class PxeSpec:
+    """`os_mode: pxe`-specific recipe block.
+
+    `server_url` — the base HTTP URL where the lab host serves the
+    baked tree. Becomes the prefix for `apkovl=` and `alpine_repo=`
+    in cmdline.txt. Example:
+        http://192.168.4.2/td-cm4
+
+    Trailing slash is stripped — pi-bake's cmdline templates always
+    append the rest as `/<host>.apkovl.tar.gz` etc.
+    """
+    server_url: str = ""
+
+    def __post_init__(self) -> None:
+        if self.server_url and not self.server_url.startswith(
+            ("http://", "https://")
+        ):
+            raise ValueError(
+                f"pxe.server_url must start with http:// or https://; "
+                f"got {self.server_url!r}"
+            )
+        # Strip trailing slash so templates concat predictably.
+        self.server_url = self.server_url.rstrip("/")
 
 
 @dataclass
@@ -215,6 +242,7 @@ class Recipe:
     ssh_host_key: str = ""
     config_txt: list[str] = field(default_factory=list)
     modules: list[str] = field(default_factory=list)
+    pxe: PxeSpec = field(default_factory=PxeSpec)
 
     def __post_init__(self) -> None:
         # os_mode validity per os
@@ -244,6 +272,21 @@ class Recipe:
                     "upgrade require a manual ritual). "
                     "Use `os_mode: ext4` for edge kernel support."
                 )
+        # pxe mode requires pxe.server_url (the lab HTTP base URL).
+        # Validated here so a malformed recipe fails fast at load,
+        # not late in the bake when the cmdline.txt template fires.
+        if self.os_mode == "pxe" and not self.pxe.server_url:
+            raise ValueError(
+                "os_mode: pxe requires pxe.server_url — the base HTTP URL "
+                "the lab host serves the baked tree at (e.g. "
+                "http://192.168.4.2/<hostname>). pi-bake substitutes this "
+                "into cmdline.txt's apkovl=... and alpine_repo=... params."
+            )
+        if self.os_mode != "pxe" and self.pxe.server_url:
+            raise ValueError(
+                "pxe.server_url set but os_mode is not pxe — pxe.* fields "
+                "are only meaningful when os_mode: pxe."
+            )
 
 
 # --------------------------------------------------------------------------- #
@@ -306,6 +349,14 @@ def _from_dict(d: dict, *, source: str = "<dict>") -> Recipe:
     _check_keys(out_raw, _OUTPUT_KEYS, f"{source}: output")
     output = OutputSpec(**out_raw)
 
+    pxe_raw = d.get("pxe") or {}
+    if not isinstance(pxe_raw, dict):
+        raise ValueError(
+            f"{source}: `pxe` must be a mapping, got {type(pxe_raw).__name__}"
+        )
+    _check_keys(pxe_raw, _PXE_KEYS, f"{source}: pxe")
+    pxe = PxeSpec(**pxe_raw)
+
     extra_pubkeys = d.get("extra_pubkeys") or []
     if not isinstance(extra_pubkeys, list):
         raise ValueError(
@@ -365,6 +416,7 @@ def _from_dict(d: dict, *, source: str = "<dict>") -> Recipe:
         ssh_host_key=d.get("ssh_host_key") or "",
         config_txt=list(config_txt),
         modules=list(modules),
+        pxe=pxe,
     )
 
 
@@ -445,8 +497,13 @@ def dump_recipe(r: Recipe) -> str:
         lines.append("modules:")
         for m in r.modules:
             lines.append(f"  - {_yaml_str(m)}")
+    if r.pxe.server_url:
+        lines.append("")
+        lines.append("# PXE-mode lab HTTP base URL (apkovl + alpine_repo target).")
+        lines.append("pxe:")
+        lines.append(f"  server_url: {_yaml_str(r.pxe.server_url)}")
     lines.append("")
-    lines.append("# Where the .img.gz lands")
+    lines.append("# Where the baked artifact lands (file for img bakes, dir for pxe)")
     lines.append("output:")
     lines.append(f"  path: {_yaml_str(r.output.path)}")
     if r.output.image_size_mb:
@@ -543,6 +600,8 @@ def recipe_to_node_config(r: Recipe):
         build_kwargs["os_mode"] = r.os_mode
     if r.output.image_size_mb:
         build_kwargs["image_size_mb"] = r.output.image_size_mb
+    if r.pxe.server_url:
+        build_kwargs["pxe_server_url"] = r.pxe.server_url
     return node, build_kwargs
 
 
