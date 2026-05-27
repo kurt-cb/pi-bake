@@ -298,9 +298,10 @@ def upgrade_to_edge_kernel(
              "--no-cache"],
         )
 
-        # Step 6. Install linux-rpi + linux-firmware-rpi + mkinitfs.
-        # mkinitfs's post-install hook regenerates the boot
-        # artefacts in /boot.
+        # Step 6. Install linux-rpi + mkinitfs. mkinitfs's
+        # post-install hook regenerates initramfs-rpi from the
+        # new kernel + extracts vmlinuz-rpi. It does NOT generate
+        # modloop-rpi — that's a separate step we do below.
         LOG.info("edge kernel upgrade: apk add %s",
                  " ".join(EDGE_UPGRADE_PACKAGES))
         _run_chroot(
@@ -308,15 +309,27 @@ def upgrade_to_edge_kernel(
             ["/sbin/apk", "add", "--no-cache", *EDGE_UPGRADE_PACKAGES],
         )
 
-        # Verify the artefacts were produced.
+        # Step 6.5. Generate modloop-rpi. Alpine's modloop is a
+        # squashfs of /lib/modules + /lib/firmware, mounted at
+        # /.modloop/ on boot and symlinked from /lib/modules.
+        # It's normally produced by Alpine's release tooling
+        # (scripts/mkimg.rpi.sh), NOT by the linux-rpi apk
+        # install hook. So `apk add linux-rpi` populates
+        # /lib/modules/<kver>/ but leaves /boot/modloop-rpi
+        # unchanged. We have to regenerate it explicitly with
+        # mksquashfs.
         chroot_boot = chroot / "boot"
+        if not (chroot_boot / "modloop-rpi").is_file():
+            _generate_modloop_rpi(chroot)
+
+        # Verify the artefacts were produced.
         missing = [f for f in _BOOT_ARTEFACTS
                    if not (chroot_boot / f).is_file()]
         if missing:
             raise RuntimeError(
                 f"edge upgrade ran but {missing} missing from "
-                f"{chroot_boot} — mkinitfs hook may not have fired. "
-                f"List what IS there:\n"
+                f"{chroot_boot} — mkinitfs / modloop generation "
+                f"may not have fired. List what IS there:\n"
                 f"{sorted(p.name for p in chroot_boot.iterdir())}"
             )
 
@@ -355,3 +368,71 @@ def _run_chroot(chroot: Path, argv: list[str]) -> None:
             f"  stdout: {r.stdout}\n"
             f"  stderr: {r.stderr}"
         )
+
+
+def _generate_modloop_rpi(chroot: Path) -> None:
+    """Build /boot/modloop-rpi as an xz squashfs of /lib/modules + /lib/firmware.
+
+    Alpine's release tooling (`scripts/mkimg.rpi.sh` →
+    `mkmodloop-boot`) builds modloop at tarball-build time. The
+    `linux-rpi` apk install hook does NOT — it only unpacks
+    /lib/modules/<kver>/ and runs depmod. So after `apk add
+    linux-rpi`, /boot/modloop-rpi is still the stable squashfs
+    from the minirootfs and won't match the new kernel's modules.
+
+    We replicate the release step inside the chroot:
+      1. apk add squashfs-tools (provides /usr/sbin/mksquashfs).
+      2. Stage /lib/modules (+ /lib/firmware if present) under a
+         /tmp/.../lib/ tree so the squashfs root looks like an
+         Alpine /lib (init mounts modloop at /.modloop and
+         expects to find modules/ + firmware/ inside).
+      3. mksquashfs the stage → /boot/modloop-rpi with xz to
+         match Alpine's release builds.
+
+    The xz compression is non-negotiable here — the stock RPi
+    initramfs's /init only knows how to mount squashfs that the
+    running kernel supports, and Alpine's vmlinuz-rpi is built
+    with CONFIG_SQUASHFS_XZ=y; gzip squashfs may also work but
+    xz keeps us bit-for-bit consistent with what mkimg.rpi.sh
+    produces.
+    """
+    LOG.info("edge kernel upgrade: generating modloop-rpi")
+    _run_chroot(
+        chroot,
+        ["/sbin/apk", "add", "--no-cache", "squashfs-tools"],
+    )
+
+    stage = "/tmp/pi-bake-modloop-stage"
+    # cp -a preserves the symlinks depmod writes (modules.alias
+    # etc. are real files but kernel-version dirs may contain
+    # source/build symlinks pointing into /usr/src that we'd
+    # rather not chase). The `2>/dev/null || true` on the
+    # firmware copy is intentional: the directory may not exist
+    # (no firmware packages installed in this chroot beyond what
+    # linux-firmware-* brings in implicitly).
+    setup_cmd = (
+        f"set -e; "
+        f"rm -rf {stage}; "
+        f"mkdir -p {stage}; "
+        f"cp -a /lib/modules {stage}/modules; "
+        f"if [ -d /lib/firmware ]; then "
+        f"  cp -a /lib/firmware {stage}/firmware; "
+        f"fi"
+    )
+    _run_chroot(chroot, ["/bin/sh", "-c", setup_cmd])
+
+    # -noappend: overwrite any existing /boot/modloop-rpi from
+    # the stable minirootfs.
+    # -comp xz: match Alpine release modloop compression.
+    # -exit-on-error: fail loud if any file can't be packed.
+    _run_chroot(
+        chroot,
+        [
+            "/usr/sbin/mksquashfs", stage, "/boot/modloop-rpi",
+            "-noappend", "-comp", "xz", "-exit-on-error",
+        ],
+    )
+
+    # Tidy up the stage so the chroot tmp dir doesn't bloat the
+    # workdir cleanup. Best-effort.
+    _run_chroot(chroot, ["/bin/sh", "-c", f"rm -rf {stage}"])
