@@ -61,6 +61,78 @@ def test_decompress_xz_rejects_non_xz(tmp_path):
         decompress_xz(src, tmp_path / "raw")
 
 
+# --------------------------------------------------------------------------- #
+# read_partition_layout — sfdisk -d parser                                     #
+# --------------------------------------------------------------------------- #
+
+
+def _fake_sfdisk_output(monkeypatch, stdout_text):
+    """Monkey-patch imgxz._sudo to return a CompletedProcess with
+    the supplied stdout. Lets us exercise the parser without
+    actually running sfdisk."""
+    import subprocess
+    import pi_bake.imgxz as imgxz_mod
+
+    def fake_sudo(*args, capture=True):
+        return subprocess.CompletedProcess(
+            args=list(args), returncode=0,
+            stdout=stdout_text, stderr="",
+        )
+
+    monkeypatch.setattr(imgxz_mod, "_sudo", fake_sudo)
+
+
+def test_read_partition_layout_real_sfdisk_format(monkeypatch, tmp_path):
+    """Real sfdisk -d output has padded numbers + space before the
+    colon. Both must parse cleanly. (Regression test for the
+    parser bug that swallowed every partition on first attempt.)"""
+    from pi_bake.imgxz import read_partition_layout
+
+    sample = (
+        "label: dos\n"
+        "label-id: 0xd50ebe3f\n"
+        "device: /tmp/x.img\n"
+        "unit: sectors\n"
+        "sector-size: 512\n"
+        "\n"
+        "/tmp/x.img1 : start=        2048, size=       10240, type=c\n"
+        "/tmp/x.img2 : start=       12288, size=       20480, type=83\n"
+    )
+    _fake_sfdisk_output(monkeypatch, sample)
+    parts = read_partition_layout(tmp_path / "any.img")
+    assert parts == [
+        (1, 2048 * 512, 10240 * 512),
+        (2, 12288 * 512, 20480 * 512),
+    ]
+
+
+def test_read_partition_layout_handles_bootable_flag(monkeypatch, tmp_path):
+    """`bootable` is a bare token (no =value), must not confuse parser."""
+    from pi_bake.imgxz import read_partition_layout
+
+    sample = (
+        "label: dos\n"
+        "device: /tmp/x.img\n"
+        "unit: sectors\n"
+        "\n"
+        "/tmp/x.img1 : start=2048, size=524288, type=c, bootable\n"
+        "/tmp/x.img2 : start=526336, size=3670016, type=83\n"
+    )
+    _fake_sfdisk_output(monkeypatch, sample)
+    parts = read_partition_layout(tmp_path / "any.img")
+    assert len(parts) == 2
+    assert parts[0] == (1, 2048 * 512, 524288 * 512)
+
+
+def test_read_partition_layout_empty_table(monkeypatch, tmp_path):
+    """No partition lines → empty result, no crash."""
+    from pi_bake.imgxz import read_partition_layout
+
+    sample = "label: dos\ndevice: /tmp/x.img\nunit: sectors\n\n"
+    _fake_sfdisk_output(monkeypatch, sample)
+    assert read_partition_layout(tmp_path / "any.img") == []
+
+
 def test_decompress_xz_idempotent(tmp_path):
     """Re-running on an already-decompressed file returns the
     cached path without re-running xz."""

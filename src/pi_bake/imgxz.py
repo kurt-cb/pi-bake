@@ -73,17 +73,36 @@ def _require_tools(*names: str) -> None:
 
 
 def _sudo(*args: str, capture: bool = True) -> subprocess.CompletedProcess:
-    """Run a sudo command; raise on non-zero with stderr surfaced.
+    """Run a privileged command; raise on non-zero with stderr surfaced.
+
+    Prefixes with `sudo` only when euid != 0. When pi-bake is invoked
+    as root (typical for LXC containers or remote bake hosts SSH'd
+    into as root), the `sudo` binary may not even be installed, and
+    prefixing with it just adds a useless dependency. Running as
+    non-root remains the normal local-laptop case and gets the sudo
+    prompt as before.
 
     capture=False is for `mount` calls where stderr is informational
     and we want it on the operator's terminal directly.
+
+    On failure (capture=True), re-raise as RuntimeError with stdout
+    + stderr inlined so the operator gets actionable output instead
+    of a bare `CalledProcessError` (subprocess swallows captured
+    streams unless the caller pulls them off the exception).
     """
-    cmd = ["sudo", *args]
-    LOG.debug("sudo: %s", " ".join(cmd))
-    kwargs: dict = {"check": True, "text": True}
-    if capture:
-        kwargs["capture_output"] = True
-    return subprocess.run(cmd, **kwargs)
+    import os as _os
+    cmd = list(args) if _os.geteuid() == 0 else ["sudo", *args]
+    LOG.debug("privileged: %s", " ".join(cmd))
+    if not capture:
+        return subprocess.run(cmd, check=True, text=True)
+    r = subprocess.run(cmd, check=False, text=True, capture_output=True)
+    if r.returncode != 0:
+        raise RuntimeError(
+            f"command failed (rc={r.returncode}): {' '.join(cmd)}\n"
+            f"--- stdout ---\n{r.stdout}"
+            f"--- stderr ---\n{r.stderr}"
+        )
+    return r
 
 
 def decompress_xz(xz_path: Path, out_dir: Path) -> Path:
@@ -139,69 +158,218 @@ def decompress_xz(xz_path: Path, out_dir: Path) -> Path:
     return raw_path
 
 
+def read_partition_layout(raw_img: Path) -> list[tuple[int, int, int]]:
+    """Read partition table from a raw image; return [(idx, start_bytes,
+    size_bytes), ...] sorted by partition index.
+
+    Parses `sfdisk -d <image>` (sfdisk reads the partition table directly
+    from a file — no loop attach needed). Output looks like:
+
+        label: dos
+        ...
+        /tmp/x.img1 : start=2048, size=524288, type=c, bootable
+        /tmp/x.img2 : start=526336, size=3670016, type=83
+
+    Sectors are 512 bytes (sfdisk's default unit on dos labels).
+    """
+    r = _sudo("sfdisk", "-d", str(raw_img))
+    parts: list[tuple[int, int, int]] = []
+    for line in r.stdout.splitlines():
+        # sfdisk prints partition lines like:
+        #   /tmp/x.img1 : start=        2048, size=       10240, type=c
+        # (note the SPACE before the colon, and padded numbers).
+        line = line.strip()
+        if ":" not in line or "start=" not in line or "size=" not in line:
+            continue
+        head, rest = line.split(":", 1)
+        head = head.rstrip()      # strip the trailing space before ':'
+        # head is `/path/to/image.imgN` — pull off the trailing digits
+        # as the partition index.
+        i = len(head)
+        while i > 0 and head[i - 1].isdigit():
+            i -= 1
+        if i == len(head):
+            continue
+        try:
+            idx = int(head[i:])
+        except ValueError:
+            continue
+        # rest is ` start=<S>, size=<Z>, type=..., [bootable]`. Values
+        # may be padded with spaces; int() handles that.
+        fields: dict[str, str] = {}
+        for kv in rest.split(","):
+            if "=" not in kv:
+                continue
+            k, v = kv.split("=", 1)
+            fields[k.strip()] = v.strip()
+        try:
+            start = int(fields["start"]) * 512
+            size = int(fields["size"]) * 512
+        except (KeyError, ValueError):
+            continue
+        parts.append((idx, start, size))
+    return sorted(parts)
+
+
+def attach_partition_loops(
+    raw_img: Path,
+) -> dict[int, str]:
+    """Attach one loop device per partition using `losetup -o <offset>
+    --sizelimit <size>`. Returns {part_idx: loop_dev}.
+
+    Why not just `losetup -fP image.img` + use `/dev/loop0pN` partition
+    nodes: in container environments where incus / lxc applies a cgroup
+    BPF device controller, partition device nodes use major 259
+    (BLOCK_EXT_MAJOR) which the BPF program may block while still
+    allowing major 7 (loop). Attaching each partition as its own
+    top-level loop device sidesteps that — every device pi-bake touches
+    is major 7.
+
+    Side benefit: simpler teardown story (each partition is just
+    another loop dev to detach), and no dependence on udev / kernel
+    partition-rescan timing.
+    """
+    parts = read_partition_layout(raw_img)
+    if not parts:
+        raise RuntimeError(
+            f"sfdisk -d {raw_img} reported no partitions — image "
+            f"doesn't have a recognizable partition table"
+        )
+    out: dict[int, str] = {}
+    for idx, start, size in parts:
+        r = _sudo(
+            "losetup", "-f", "--show",
+            "-o", str(start), "--sizelimit", str(size),
+            str(raw_img),
+        )
+        loop_dev = r.stdout.strip()
+        if not loop_dev.startswith("/dev/loop"):
+            raise RuntimeError(
+                f"losetup returned unexpected device {loop_dev!r} for "
+                f"partition {idx}"
+            )
+        out[idx] = loop_dev
+        LOG.info("losetup: partition %d (offset=%d, size=%d) → %s",
+                 idx, start, size, loop_dev)
+    return out
+
+
+def detach_loops(loops: dict[int, str]) -> None:
+    """losetup -d every loop dev in the dict; best-effort (warn,
+    don't raise). Mirrors `unmount_image`'s teardown discipline.
+    """
+    for idx, loop in loops.items():
+        try:
+            _sudo("losetup", "-d", loop, capture=False)
+        except (subprocess.CalledProcessError, RuntimeError) as e:
+            LOG.warning("losetup -d %s (part %d) failed: %s",
+                        loop, idx, e)
+
+
+def ensure_partition_nodes(loop_dev: str) -> list[str]:
+    """Create /dev/<loop>p<N> nodes for every partition the kernel
+    scanned on `loop_dev`. Returns the list of partition device paths.
+
+    Background: `losetup -fP` causes the kernel to read the partition
+    table and register each partition in sysfs (`/sys/block/<loop>/
+    <loop>pN/`). On a normal host, udev watches these uevents and
+    creates the matching `/dev/<loop>pN` block-device nodes. In an
+    LXC container (or any environment without udev — Alpine minirootfs,
+    busybox-only systems), no node ever gets created, and the next
+    `mkfs.vfat /dev/loop0p1` fails with ENOENT.
+
+    Fix: read the partition's major:minor from sysfs and mknod the
+    node ourselves. Idempotent (no-op when the node already exists).
+
+    Returns the partition device paths in numeric order
+    (`['/dev/loop0p1', '/dev/loop0p2', ...]`).
+    """
+    import os as _os
+    loop_name = loop_dev.rsplit("/", 1)[-1]
+    sys_block = f"/sys/block/{loop_name}"
+    if not _os.path.isdir(sys_block):
+        raise RuntimeError(
+            f"loop device sysfs entry {sys_block} missing — partition "
+            f"scan didn't register. Check `losetup -P` ran cleanly."
+        )
+    # Sort by partition index suffix so /dev/loop0p1 precedes p2 etc.
+    parts: list[tuple[int, str, str, str]] = []
+    for name in sorted(_os.listdir(sys_block)):
+        if not name.startswith(loop_name + "p"):
+            continue
+        idx_str = name[len(loop_name) + 1:]
+        if not idx_str.isdigit():
+            continue
+        dev_file = f"{sys_block}/{name}/dev"
+        try:
+            with open(dev_file) as f:
+                major, minor = f.read().strip().split(":")
+        except (OSError, ValueError):
+            continue
+        parts.append((int(idx_str), name, major, minor))
+
+    dev_paths: list[str] = []
+    for idx, name, major, minor in sorted(parts):
+        dev_path = f"/dev/{name}"
+        dev_paths.append(dev_path)
+        if _os.path.exists(dev_path):
+            continue
+        _sudo("mknod", dev_path, "b", major, minor, capture=False)
+        _sudo("chmod", "660", dev_path, capture=False)
+    return dev_paths
+
+
 def mount_image(raw_img: Path, workdir: Path) -> MountedImage:
-    """losetup -fP the image and mount each partition.
+    """Attach a loop dev per partition (offset-based) and mount each.
 
     Returns a `MountedImage` with `mounts[part_idx] = mount_dir`.
     Caller is responsible for calling `unmount_image()` on it (use
     a try/finally — losetup leaks are gnarly to debug).
+
+    Why per-partition (not `losetup -fP` + `/dev/loopNpM`): see
+    [[attach_partition_loops]] doc — partition nodes use major 259
+    which incus / lxc cgroup-BPF can block. Top-level loop devices
+    use major 7, already allowed in most container policies.
 
     Mount discipline:
       - Each partition mounted RW under workdir/p<N>
       - Mount type auto-detected by the kernel (vfat / ext4 / btrfs)
       - No mount options beyond defaults
     """
-    _require_tools("losetup", "mount", "umount", "partprobe", "lsblk")
+    _require_tools("losetup", "mount", "umount", "sfdisk")
     workdir.mkdir(parents=True, exist_ok=True)
 
-    # losetup -f finds a free loop, -P scans the partition table,
-    # --show prints the device name we got.
-    r = _sudo("losetup", "-fP", "--show", str(raw_img))
-    loop_dev = r.stdout.strip()
-    if not loop_dev.startswith("/dev/loop"):
-        raise RuntimeError(
-            f"losetup returned unexpected device {loop_dev!r}"
-        )
-    LOG.info("losetup: %s → %s", raw_img.name, loop_dev)
-
-    # In case kernel hasn't fully scanned the partition table yet.
-    _sudo("partprobe", loop_dev, capture=False)
-
-    # Enumerate partitions via /dev/loopNpM glob — lsblk -nlo NAME
-    # gives stable ordering.
-    r = _sudo(
-        "lsblk", "-nlo", "NAME", "-x", "NAME", loop_dev,
-    )
-    part_names = [
-        line.strip() for line in r.stdout.splitlines()
-        if line.strip().startswith(Path(loop_dev).name + "p")
-    ]
-    if not part_names:
-        # Image has no partition table — treat the whole loop dev as
-        # one partition (rare for our targets but graceful).
-        part_names = [Path(loop_dev).name]
-    LOG.info("partitions: %s", part_names)
+    loops = attach_partition_loops(raw_img)
 
     mounts: dict[int, Path] = {}
-    for idx, name in enumerate(part_names, start=1):
-        dev = f"/dev/{name}"
+    for idx, loop_dev in sorted(loops.items()):
         mp = workdir / f"p{idx}"
         mp.mkdir(exist_ok=True)
-        _sudo("mount", dev, str(mp), capture=False)
+        _sudo("mount", loop_dev, str(mp), capture=False)
         mounts[idx] = mp
 
-    return MountedImage(
-        raw_img=raw_img, loop_dev=loop_dev,
+    # Store the first partition's loop_dev in the legacy `loop_dev`
+    # field so back-compat callers still see a string there; the
+    # full per-partition map lives in `_loops` (private — direct
+    # consumers should call `unmount_image()` to clean up).
+    primary = sorted(loops.values())[0] if loops else ""
+    mi = MountedImage(
+        raw_img=raw_img, loop_dev=primary,
         mounts=mounts, workdir=workdir,
     )
+    # Stash the full loop map on the dataclass so unmount can detach
+    # them all. Using an attribute set rather than dataclass field so
+    # we don't break MountedImage's public surface.
+    mi._loops = loops  # type: ignore[attr-defined]
+    return mi
 
 
 def unmount_image(mi: MountedImage) -> None:
-    """Sync, unmount everything, detach the loop device.
+    """Sync, unmount every partition, detach every per-partition loop.
 
     Safe to call multiple times — silently skips already-cleaned
-    mounts. Always tries to detach the loop dev even if some
-    unmount failed (avoid losetup leaks).
+    mounts. Always tries to detach all loops even if some unmount
+    failed (avoid losetup leaks).
     """
     # Sync first — otherwise pending writes can land after umount.
     subprocess.run(["sync"], check=False)
@@ -209,14 +377,19 @@ def unmount_image(mi: MountedImage) -> None:
     for mp in mi.mounts.values():
         try:
             _sudo("umount", str(mp), capture=False)
-        except subprocess.CalledProcessError as e:
+        except (subprocess.CalledProcessError, RuntimeError) as e:
             LOG.warning("umount %s failed (ignoring): %s", mp, e)
 
-    try:
-        _sudo("losetup", "-d", mi.loop_dev)
-    except subprocess.CalledProcessError as e:
-        LOG.warning("losetup -d %s failed (ignoring): %s",
-                    mi.loop_dev, e)
+    loops = getattr(mi, "_loops", None)
+    if loops:
+        detach_loops(loops)
+    elif mi.loop_dev:
+        # Back-compat: caller built the MountedImage without _loops
+        try:
+            _sudo("losetup", "-d", mi.loop_dev, capture=False)
+        except (subprocess.CalledProcessError, RuntimeError) as e:
+            LOG.warning("losetup -d %s failed (ignoring): %s",
+                        mi.loop_dev, e)
 
 
 def recompress_xz(raw_img: Path, out_xz: Path,
@@ -248,21 +421,25 @@ def write_file(
     the mounted ext4 (root does, after losetup). `sudo tee` is the
     portable trick.
     """
+    import os as _os
     target = mount_root / rel_path.lstrip("/")
-    # Make sure the parent dir exists (sudo mkdir -p is harmless if
-    # it already does).
+    # Make sure the parent dir exists.
     _sudo("mkdir", "-p", str(target.parent), capture=False)
     body = content.encode() if isinstance(content, str) else content
-    # `sudo tee` reads from stdin; pipe via subprocess.
-    p = subprocess.Popen(
-        ["sudo", "tee", str(target)],
-        stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
-    )
-    assert p.stdin is not None
-    p.stdin.write(body)
-    p.stdin.close()
-    if p.wait() != 0:
-        raise RuntimeError(f"failed to write {target}")
+    # As root, write directly. Non-root: pipe through `sudo tee`.
+    if _os.geteuid() == 0:
+        with open(target, "wb") as f:
+            f.write(body)
+    else:
+        p = subprocess.Popen(
+            ["sudo", "tee", str(target)],
+            stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+        )
+        assert p.stdin is not None
+        p.stdin.write(body)
+        p.stdin.close()
+        if p.wait() != 0:
+            raise RuntimeError(f"failed to write {target}")
     _sudo("chmod", f"{mode:o}", str(target), capture=False)
     return target
 
@@ -283,17 +460,23 @@ def append_file(
     existing config files (e.g. config.txt) where we want the
     operator's lines after the shipped baseline.
     """
+    import os as _os
     target = mount_root / rel_path.lstrip("/")
     if ensure_trailing_newline and not content.endswith("\n"):
         content = content + "\n"
-    # sudo sh -c 'cat >> target' to do the append as root.
-    p = subprocess.Popen(
-        ["sudo", "sh", "-c", f"cat >> {target}"],
-        stdin=subprocess.PIPE,
-    )
-    assert p.stdin is not None
-    p.stdin.write(content.encode())
-    p.stdin.close()
-    if p.wait() != 0:
-        raise RuntimeError(f"failed to append to {target}")
+    # As root: open with append mode directly. Non-root: pipe through
+    # `sudo sh -c 'cat >> target'`.
+    if _os.geteuid() == 0:
+        with open(target, "ab") as f:
+            f.write(content.encode())
+    else:
+        p = subprocess.Popen(
+            ["sudo", "sh", "-c", f"cat >> {target}"],
+            stdin=subprocess.PIPE,
+        )
+        assert p.stdin is not None
+        p.stdin.write(content.encode())
+        p.stdin.close()
+        if p.wait() != 0:
+            raise RuntimeError(f"failed to append to {target}")
     return target

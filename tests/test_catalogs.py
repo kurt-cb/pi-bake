@@ -122,3 +122,25 @@ def test_resolve_image_uses_minor_for_alpine():
     _, _, url = resolve_image("alpine", "3.21.4", "aarch64")
     assert "/v3.21/" in url
     assert "alpine-rpi-3.21.4-aarch64.tar.gz" in url
+
+
+def test_alpine_edge_in_catalog_resolves_to_stable_url():
+    """`edge` is in the ALPINE.versions tuple so resolve_image
+    accepts it, but the URL falls back to the latest stable RPi
+    tarball — Alpine ships no edge tarball, and the ext4 backend
+    doesn't use the URL anyway (it bootstraps via apk-tools-static
+    against upstream repos). The returned version stays 'edge' so
+    downstream code can branch on it."""
+    os_, version, url = resolve_image("alpine", "edge", "aarch64")
+    assert version == "edge"
+    assert "edge" not in url
+    assert "alpine-rpi-3." in url
+
+
+def test_alpine_edge_present_in_catalog():
+    alpine = get_os("alpine")
+    assert "edge" in alpine.versions
+    # latest() returns versions[0] which must be a stable point
+    # release — `edge` is never the default.
+    assert alpine.latest() != "edge"
+    assert "." in alpine.latest()

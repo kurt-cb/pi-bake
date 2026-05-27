@@ -1,0 +1,55 @@
+# Pi 5 (aarch64) — Alpine sys-mode on ext4. Real partitioned image.
+#
+# Same operator-visible recipe schema as the default Alpine bake;
+# `os_mode: ext4` flips the on-disk shape from diskless (apkovl
+# overlay + modloop squashfs on FAT) to a normal partitioned image
+# (FAT /boot + ext4 /).
+#
+# When to pick ext4 over the default diskless mode:
+#   - You need the edge kernel (`os_version: edge` ONLY works here;
+#     diskless rejects it at recipe-load time — see feature_request.md
+#     for the reasoning).
+#   - You expect to `apk add` / `apk upgrade` on the running Pi later
+#     and want the normal Alpine behavior (writes land on the real
+#     ext4 root, persist across reboot without `lbu commit`).
+#   - You want to set up A/B watchdog boot or other layered-rootfs
+#     schemes that need a real root partition.
+#
+# Trade-offs vs. diskless:
+#   - Bake REQUIRES SUDO (losetup + mount + mkfs). Diskless is no-root.
+#   - Larger image (~250 MB compressed baseline, ~2 GB raw FAT+ext4).
+#     Diskless baseline is ~200 MB compressed.
+#   - Slower cold boot vs. tmpfs warm-start (real fs init).
+#   - lbu / apkovl irrelevant (config lives in real /etc).
+#
+# Output is .img.xz (not .img.gz like diskless mode).
+
+hostname: td-pi5-ext4
+board: pi-5
+os: alpine
+os_mode: ext4
+
+# Edge kernel for newer hardware support (Intel BE200 iwlwifi, etc.).
+# Replace with a stable point release like "3.21.4" if you don't
+# specifically need edge.
+os_version: edge
+
+ssh_pubkey: ~/.ssh/totaldns-adhoc.pub
+
+network:
+  mode: dhcp
+  send_hostname: true
+
+# Same packages: schema as diskless — installed at bake time via
+# apk-tools-static + first-boot apk-fix finalizes any pending
+# triggers (`--no-scripts` is on at bake to keep cross-arch sane).
+packages:
+  - avahi
+  - avahi-tools
+  - dbus
+  - py3-pydbus
+
+output:
+  path: ~/sdcards/td-pi5-ext4.img.xz
+  # ext4 default is 2048 MB; bump if you need a larger root partition.
+  image_size_mb: 2048

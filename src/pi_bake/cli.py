@@ -166,6 +166,7 @@ def _cmd_build(args: argparse.Namespace) -> int:
             board=args.board,
             os=args.os_name,
             os_version=args.version or "",
+            os_mode=args.os_mode or "",
             timezone=args.timezone,
             ssh_pubkey=args.ssh_pubkey or pubkey,
             extra_pubkeys=list(args.extra_pubkey or []),
@@ -285,7 +286,16 @@ def _build_parser() -> argparse.ArgumentParser:
     p_b.add_argument("--os", dest="os_name",
                      help="alpine | raspbian | debian")
     p_b.add_argument("--version",
-                     help="OS version (default: latest known-good)")
+                     help="OS version (default: latest known-good). "
+                          "Alpine accepts `edge`, which requires "
+                          "--os-mode ext4.")
+    p_b.add_argument("--os-mode", dest="os_mode", default="",
+                     help="Alpine image layout: 'diskless' (default, "
+                          "no-root bake, apkovl-overlay; what pi-bake "
+                          "has always done) or 'ext4' (sys-mode on a "
+                          "real partitioned image, FAT /boot + ext4 /, "
+                          "requires sudo, normal `apk upgrade` works). "
+                          "Ignored for non-Alpine backends.")
     p_b.add_argument("--hostname",
                      help="DNS-label-safe hostname")
     p_b.add_argument("--ssh-pubkey", metavar="PATH",

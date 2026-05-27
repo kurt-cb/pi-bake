@@ -1,0 +1,19 @@
+# Smoke-test recipe — alpine ext4 sys-mode with an inline pubkey
+# so it bakes without depending on operator files on the bake host.
+# NOT a deployable recipe — the pubkey is a known throwaway used
+# only to exercise the bake pipeline end-to-end.
+
+hostname: smoketest
+board: pi-5
+os: alpine
+os_mode: ext4
+os_version: 3.21.4
+
+ssh_pubkey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAItesting smoketest@pi-bake"
+
+network:
+  mode: dhcp
+  send_hostname: true
+
+output:
+  path: ~/sdcards/smoketest.img.xz

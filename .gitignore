@@ -10,3 +10,11 @@ dist/
 *.img
 *.img.gz
 *.apkovl.tar.gz
+/.claude/settings.local.json
+
+# Operator + session scratch (not for the repo)
+/out/
+/dnsmasq.log
+/mynotes.txt
+/t
+/t1

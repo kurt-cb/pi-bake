@@ -46,8 +46,12 @@ ALPINE = OSImage(
     name="alpine",
     pretty="Alpine Linux",
     bake_backend="alpine",
-    # Order matters: latest() returns versions[0].
-    versions=("3.21.4", "3.21.3", "3.20.5", "3.19.7"),
+    # Order matters: latest() returns versions[0]. `edge` is only
+    # valid with os_mode: ext4 — see recipe.py validation. In
+    # diskless mode Alpine upstream ships no RPi tarball for edge,
+    # and modloop-on-FAT makes post-boot kernel upgrade a manual
+    # ritual we won't paper over.
+    versions=("3.21.4", "3.21.3", "3.20.5", "3.19.7", "edge"),
     url_template=(
         "https://dl-cdn.alpinelinux.org/alpine/"
         "v{minor_version}/releases/{arch}/"
@@ -64,7 +68,7 @@ ALPINE = OSImage(
     notes=(
         "Pi 5 support is recent. If 3.21 fails on Pi 5, try 3.22+. "
         "armhf is for the original Pi Zero W ONLY — every other board "
-        "wants aarch64."
+        "wants aarch64. `edge` requires os_mode: ext4."
     ),
 )
 
@@ -206,6 +210,21 @@ def resolve_image(
         pass
 
     download_version = version
+
+    # Alpine `edge`: no RPi tarball exists on edge, but in ext4 mode
+    # we don't need one — alpine_ext4.py bootstraps from upstream
+    # apk repositories directly. We still return a URL for the
+    # latest stable tarball so the field is populated (callers that
+    # check it for `tarball` image_kind get a valid value); the
+    # ext4 backend ignores the URL and points apk at edge repos
+    # itself. The diskless backend never sees `edge` because
+    # recipe.py validation rejects it.
+    if os_.name == "alpine" and download_version == "edge":
+        # Latest stable in the catalog tuple, skipping `edge` itself.
+        stable_versions = tuple(
+            v for v in os_.versions if v != "edge" and "." in v
+        )
+        download_version = stable_versions[0] if stable_versions else version
 
     # Alpine URLs need both `version` (3.21.4) and `minor_version` (3.21).
     # Fedora URLs need `minor_version` = the major (e.g. "41" from "41-1.4").

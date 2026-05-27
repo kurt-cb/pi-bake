@@ -540,3 +540,97 @@ def test_config_txt_and_modules_passed_to_nodeconfig():
     node, _ = recipe_to_node_config(r)
     assert node.config_txt == ["dtparam=spi=on"]
     assert node.modules == ["mcp251x"]
+
+
+# --------------------------------------------------------------------------- #
+# os_mode: diskless / ext4 selection + edge gating                             #
+# --------------------------------------------------------------------------- #
+
+
+def test_os_mode_defaults_empty(tmp_path):
+    r = _write_and_load(tmp_path, _minimal_yaml())
+    # Empty string = back-compat default (alpine diskless).
+    assert r.os_mode == ""
+
+
+def test_os_mode_ext4_loads(tmp_path):
+    body = _minimal_yaml() + "os_mode: ext4\n"
+    r = _write_and_load(tmp_path, body)
+    assert r.os_mode == "ext4"
+
+
+def test_os_mode_invalid_value_rejected(tmp_path):
+    body = _minimal_yaml() + "os_mode: zfs\n"
+    with pytest.raises(ValueError, match="os_mode"):
+        _write_and_load(tmp_path, body)
+
+
+def test_os_mode_rejected_for_non_alpine(tmp_path):
+    body = f"""
+hostname: x
+board: pi-5
+os: raspbian
+os_mode: ext4
+ssh_pubkey: "{_PUBKEY}"
+output:
+  path: /tmp/x.img.gz
+"""
+    with pytest.raises(ValueError, match="os_mode is only meaningful"):
+        _write_and_load(tmp_path, body)
+
+
+def test_edge_in_diskless_rejected(tmp_path):
+    body = _minimal_yaml() + "os_version: edge\n"
+    with pytest.raises(ValueError, match="edge is not supported"):
+        _write_and_load(tmp_path, body)
+
+
+def test_edge_in_explicit_diskless_rejected(tmp_path):
+    body = _minimal_yaml() + "os_version: edge\nos_mode: diskless\n"
+    with pytest.raises(ValueError, match="edge is not supported"):
+        _write_and_load(tmp_path, body)
+
+
+def test_edge_in_ext4_accepted(tmp_path):
+    body = _minimal_yaml() + "os_version: edge\nos_mode: ext4\n"
+    r = _write_and_load(tmp_path, body)
+    assert r.os_version == "edge"
+    assert r.os_mode == "ext4"
+
+
+def test_os_mode_round_trip(tmp_path):
+    """ext4 + edge survives a dump/load cycle."""
+    r1 = Recipe(
+        hostname="t", board="pi-5", os="alpine",
+        os_version="edge", os_mode="ext4",
+        ssh_pubkey=_PUBKEY,
+        output=OutputSpec(path="/tmp/x.img.gz"),
+    )
+    p = tmp_path / "round.yaml"
+    p.write_text(dump_recipe(r1))
+    r2 = load_recipe(p)
+    assert r2 == r1
+
+
+def test_os_mode_threaded_to_build_kwargs():
+    r = Recipe(
+        hostname="t", board="pi-5", os="alpine",
+        os_version="edge", os_mode="ext4",
+        ssh_pubkey=_PUBKEY,
+        output=OutputSpec(path="/tmp/x.img.gz"),
+    )
+    _, build_kwargs = recipe_to_node_config(r)
+    assert build_kwargs.get("os_mode") == "ext4"
+
+
+def test_os_mode_diskless_default_not_threaded():
+    """Default diskless mode: build_kwargs has no os_mode key
+    (back-compat — bake.build() defaults to '' and dispatches
+    to alpine.py's diskless backend)."""
+    r = Recipe(
+        hostname="t", board="pi-5", os="alpine",
+        ssh_pubkey=_PUBKEY,
+        output=OutputSpec(path="/tmp/x.img.gz"),
+    )
+    _, build_kwargs = recipe_to_node_config(r)
+    assert "os_mode" not in build_kwargs

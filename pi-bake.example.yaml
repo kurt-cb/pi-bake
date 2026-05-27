@@ -49,10 +49,20 @@ output:
 # --------------------------------------------------------------------------
 
 # OS version. Empty / omitted → latest known-good in the catalog.
-#   - alpine: "3.21.4", "3.21.3", "3.20.5"
+#   - alpine: "3.21.4", "3.21.3", "3.20.5", "edge" (ext4 mode only)
 #   - raspbian: "bookworm"
 #   - debian: "12.7-arm64"
 # os_version: 3.21.4
+
+# OS layout (Alpine only). Default `diskless` (the v0.0+ Alpine RPi
+# tarball shape — apkovl overlay + modloop squashfs on FAT, no-root
+# bake). Set to `ext4` for sys-mode Alpine on a real partitioned
+# image (FAT /boot + ext4 /); requires sudo. ext4 is the only mode
+# that supports `os_version: edge` — diskless rejects it because
+# Alpine ships no RPi edge tarball and modloop-on-FAT makes
+# post-boot kernel upgrade an awkward ritual. Ignored for non-Alpine
+# backends.
+# os_mode: ext4
 
 # IANA timezone. Default UTC. Some clocks (Pi has no RTC) come up
 # at 1970-01-01 anyway until chrony syncs — this is only the

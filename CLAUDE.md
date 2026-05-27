@@ -62,7 +62,18 @@ the v0.2.1–v0.2.6 work for archaeology.
 
 ### What ships
 
-- **Alpine baker** — fully working, no-root, mtools-based.
+- **Alpine baker (diskless, default)** — fully working, no-root,
+  mtools-based. The v0.0+ apkovl + modloop-on-FAT shape.
+- **Alpine ext4 baker (`os_mode: ext4`, v0.3.1+)** — losetup-based
+  sys-mode Alpine on a real partitioned image (FAT /boot + ext4 /).
+  REQUIRES SUDO. Bootstraps via apk-tools-static with `--no-scripts`
+  (cross-arch safe); a first-boot `apk fix --no-network` finalizes
+  pending triggers via the `/etc/init.d/pi-bake-firstboot-fix`
+  one-shot service. The ONLY mode that supports `os_version: edge`
+  — diskless+edge raises at recipe-load because Alpine ships no
+  RPi edge tarball and modloop-on-FAT makes post-boot kernel
+  upgrade an awkward ritual. See `alpine_ext4.py` + `examples/
+  pi-5-alpine-ext4.yaml`. Outputs `.img.xz` (not `.img.gz`).
 - **Raspbian + Debian backends** — losetup-based, REQUIRES SUDO
   (or run inside a privileged LXC container). Same NodeConfig +
   YAML schema as Alpine; `os: raspbian` or `os: debian` swaps

@@ -32,6 +32,7 @@ def build(
     node: NodeConfig, out_path: str | Path,
     image_size_mb: int | None = None,
     extra_packages: list[str] | None = None,
+    os_mode: str = "",
     apk_fetch: bool = True,  # DEPRECATED — always-on; kept for back-compat
 ) -> Path:
     """Build an `.img.gz` for `(board, os, version, node)`.
@@ -43,6 +44,12 @@ def build(
         regenerates + signs the FAT-resident APKINDEX, and adds
         them to `/etc/apk/world` so init installs them at init
         time. Offline first boot guaranteed.
+    `os_mode` → image layout for Alpine. Empty / "diskless" =
+        default tarball-based no-root bake. "ext4" = sys-mode
+        Alpine on a real partitioned image (FAT /boot + ext4 /),
+        requires sudo. Ignored for non-Alpine backends. Edge
+        kernel selection (`version="edge"`) requires ext4 — the
+        diskless backend rejects it at recipe-load time.
 
     `apk_fetch` is a DEPRECATED no-op; always-on whenever
     `extra_packages` is non-empty. Kept in the signature for
@@ -62,6 +69,25 @@ def build(
             f"Supported boards for {o.name}: {sorted(o.supports_boards)}"
         )
 
+    # Same guard the recipe loader applies — catches CLI users
+    # who bypass Recipe (--os alpine --version edge --os-mode diskless).
+    if o.name == "alpine" and version == "edge":
+        effective_mode = os_mode or "diskless"
+        if effective_mode != "ext4":
+            raise ValueError(
+                "Alpine edge is not supported in diskless mode "
+                "(Alpine upstream ships no RPi edge tarball, and "
+                "diskless's modloop-on-FAT makes post-boot kernel "
+                "upgrade require a manual ritual). "
+                "Pass --os-mode ext4 for edge kernel support."
+            )
+
+    if os_mode and o.name != "alpine":
+        raise ValueError(
+            f"os_mode is only meaningful for os: alpine; "
+            f"got os={o.name!r} with os_mode={os_mode!r}"
+        )
+
     o, resolved_version, url = resolve_image(
         o.name, version, b.arch, board_slug=b.name,
     )
@@ -73,6 +99,18 @@ def build(
 
     backend = o.bake_backend
     if backend == "alpine":
+        if os_mode == "ext4":
+            from pi_bake import alpine_ext4
+            return alpine_ext4.bake(
+                node=node, out_path=Path(out_path),
+                arch=b.arch,
+                alpine_version=resolved_version,
+                extra_packages=extra_packages,
+                image_size_mb=image_size_mb,
+            )
+        # diskless (default) — original alpine backend, RPi tarball.
+        # Edge selection was already rejected at recipe load for
+        # diskless, so resolved_version here is a stable point release.
         from pi_bake import alpine
         minor = ".".join(resolved_version.split(".")[:2])
         alpine_branch = f"v{minor}"

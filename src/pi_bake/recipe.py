@@ -48,11 +48,18 @@ except ImportError as e:   # pragma: no cover
 
 
 _TOP_KEYS = frozenset({
-    "hostname", "board", "os", "os_version", "timezone",
+    "hostname", "board", "os", "os_version", "os_mode", "timezone",
     "ssh_pubkey", "extra_pubkeys", "ssh_host_key",
     "network", "wifi", "packages", "apk_fetch",
     "config_txt", "modules", "output",
 })
+
+# Valid os_mode values per os. Empty set = mode doesn't apply
+# (backend has only one layout). "" entry is the back-compat
+# default (= "diskless" for alpine).
+_VALID_OS_MODES: dict[str, frozenset[str]] = {
+    "alpine": frozenset({"", "diskless", "ext4"}),
+}
 _NETWORK_KEYS = frozenset({"mode", "address", "gateway", "send_hostname"})
 _WIFI_KEYS    = frozenset({"ssid", "psk", "country"})
 _OUTPUT_KEYS  = frozenset({"path", "image_size_mb"})
@@ -182,6 +189,15 @@ class Recipe:
     cover most cases, but `modules:` is the override for cards
     that need an explicit `modprobe` at boot (e.g. `mcp251x`
     for the MCP2515 CAN controller). Order is preserved.
+
+    `os_mode`: image layout for `os: alpine`. Defaults to
+    `diskless` (the v0.0+ Alpine RPi tarball shape — apkovl
+    overlay + modloop squashfs on FAT, no-root bake). Set to
+    `ext4` for sys-mode Alpine on a real partitioned image
+    (FAT `/boot` + ext4 `/`). ext4 mode requires sudo (losetup
+    + mount) but makes `apk upgrade linux-rpi` work normally,
+    which is the only honest way to use `os_version: edge`.
+    Has no effect when `os` is not `alpine`.
     """
     hostname: str
     board: str
@@ -189,6 +205,7 @@ class Recipe:
     ssh_pubkey: str
     output: OutputSpec
     os_version: str = ""
+    os_mode: str = ""
     timezone: str = "UTC"
     extra_pubkeys: list[str] = field(default_factory=list)
     network: NetworkSpec = field(default_factory=NetworkSpec)
@@ -198,6 +215,35 @@ class Recipe:
     ssh_host_key: str = ""
     config_txt: list[str] = field(default_factory=list)
     modules: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        # os_mode validity per os
+        if self.os in _VALID_OS_MODES:
+            allowed = _VALID_OS_MODES[self.os]
+            if self.os_mode not in allowed:
+                raise ValueError(
+                    f"os_mode={self.os_mode!r} not valid for os={self.os!r}; "
+                    f"allowed: {sorted(allowed - {''})}"
+                )
+        elif self.os_mode:
+            raise ValueError(
+                f"os_mode is only meaningful for os: alpine; "
+                f"got os={self.os!r} with os_mode={self.os_mode!r}"
+            )
+        # Alpine edge requires ext4 — diskless has no upstream
+        # edge RPi tarball and modloop-on-FAT makes post-boot
+        # kernel upgrade require a manual ritual we won't
+        # paper over. See feature_request.md for full context.
+        if self.os == "alpine" and self.os_version == "edge":
+            effective_mode = self.os_mode or "diskless"
+            if effective_mode != "ext4":
+                raise ValueError(
+                    "os_version: edge is not supported in Alpine diskless "
+                    "mode (Alpine upstream ships no RPi edge tarball, and "
+                    "diskless's modloop-on-FAT makes post-boot kernel "
+                    "upgrade require a manual ritual). "
+                    "Use `os_mode: ext4` for edge kernel support."
+                )
 
 
 # --------------------------------------------------------------------------- #
@@ -309,6 +355,7 @@ def _from_dict(d: dict, *, source: str = "<dict>") -> Recipe:
         ssh_pubkey=d["ssh_pubkey"],
         output=output,
         os_version=d.get("os_version") or "",
+        os_mode=d.get("os_mode") or "",
         timezone=d.get("timezone") or "UTC",
         extra_pubkeys=[str(k) for k in extra_pubkeys],
         network=network,
@@ -344,6 +391,8 @@ def dump_recipe(r: Recipe) -> str:
     lines.append(f"os: {_yaml_str(r.os)}")
     if r.os_version:
         lines.append(f"os_version: {_yaml_str(r.os_version)}")
+    if r.os_mode:
+        lines.append(f"os_mode: {_yaml_str(r.os_mode)}")
     if r.timezone and r.timezone != "UTC":
         lines.append(f"timezone: {_yaml_str(r.timezone)}")
     lines.append("")
@@ -490,6 +539,8 @@ def recipe_to_node_config(r: Recipe):
         # deprecated no-op since #3 made init-time install the only
         # path. Kept as a schema field so old recipes don't break.
     }
+    if r.os_mode:
+        build_kwargs["os_mode"] = r.os_mode
     if r.output.image_size_mb:
         build_kwargs["image_size_mb"] = r.output.image_size_mb
     return node, build_kwargs
