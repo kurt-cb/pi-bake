@@ -753,6 +753,176 @@ out/<hostname>-nfs/                 # NFS-served rootfs
   the boot environment; the operator scripts the EEPROM
   update inside it.
 
+### Direct-to-device flash + safety guards
+
+**From:** pi-bake session — 2026-05-27. Surfaced during the
+ext4 hardware-bring-up loop after spending an hour staring at a
+2 GB image getting dd'd onto an SD via SSH at 500 KB/s. The
+end result was the same as if pi-bake had been able to write
+straight to a block device.
+
+**The shape:** `output.path:` accepts a `/dev/...` block device,
+not just a file path. pi-bake handles xz-decompression inline
+and dd's directly to the device, replacing the operator
+workflow:
+
+```
+xzcat out/image.img.xz | sudo dd of=/dev/mmcblk0 bs=4M ...
+```
+
+with:
+
+```yaml
+output:
+  path: /dev/mmcblk0       # block device, not a file
+  overwrite: confirm       # see safety guards below
+```
+
+**Why it matters:**
+- One less manual step + xz-decompression-fopped-into-bash quirk
+  to teach every operator.
+- Pi-bake already knows the image bytes — passing through xz
+  + ssh + dd was always lossy. Direct write removes 2 layers
+  of stream wrangling.
+- Lets pi-bake apply guards we can't apply from a shell pipe
+  (see safety below).
+- For ext4 mode, this would replace the `losetup + xz + dd`
+  dance the operator has to do at the end with a single
+  pi-bake invocation that ends with the SD card ready.
+
+**Safety guards (the part that makes this not-terrifying):**
+
+1. **Filesystem-detection refusal.** Before writing, pi-bake
+   reads the first few sectors of the target. If it sees a
+   recognizable filesystem (FAT, ext4, btrfs, NTFS, …) AND
+   the recipe has `overwrite: forbid` (default), pi-bake
+   refuses + tells operator what's there. `overwrite:
+   confirm` re-prompts the operator interactively. `overwrite:
+   yes` proceeds without prompt (CI / scripted bakes).
+2. **Mount detection.** Refuse if the target (or any
+   partition of it) is currently mounted anywhere. Catches
+   the "I aimed at /dev/sda by accident and it's my root
+   disk" foot-gun.
+3. **Size sanity.** Refuse if the image is bigger than the
+   target device. Refuse if the target is suspiciously
+   large (>~512 GB suggests it's not an SD — likely a
+   data drive).
+4. **Removable-only by default.** Read /sys/block/<dev>/
+   removable; default to refusing fixed disks. `--allow-fixed`
+   opt-in for unusual setups.
+5. **Confirmation prompt.** Interactive default: print target
+   device info (size, model, current FS) and require operator
+   to type the model string back before proceeding.
+
+**Implementation sketch:**
+- New `OutputSpec.overwrite: str = "forbid"` field
+  (forbid / confirm / yes).
+- New module `src/pi_bake/devflash.py` with the safety
+  checks + the write loop (using `iflag=fullblock` semantics
+  but in Python — read full blocks, write full blocks).
+- bake.py detects when `output.path` is a block device
+  (stat() + S_ISBLK) vs a file path and dispatches:
+  file path → existing pipeline → produce .img.xz at path
+  block device → existing pipeline → devflash to device
+
+**Cross-refs:**
+- [[ab-slot-boot]] — once direct-to-device exists, A/B slot
+  writes become natural (partition the target, write to the
+  inactive slot).
+- [[iflag-fullblock-documented]] — the SSH-stream flash
+  workaround we'd no longer need.
+
+### A/B slot boot + atomic upgrade
+
+**From:** pi-bake session — 2026-05-27. mynotes.txt has the
+original framing ("Two OS boot with watchdog scaffold"); this
+entry is the more concrete design now that we have ext4 sys-
+mode working.
+
+**The shape:** image layout with TWO root-fs slots (`/dev/
+mmcblk0p2` and `/dev/mmcblk0p3` or similar). Bootloader picks
+which slot to boot via `cmdline.txt` updated at upgrade time.
+Watchdog reverts to the other slot if first-boot sanity check
+fails.
+
+```
+SD card:
+  p1: FAT /boot      (256 MB) — kernel + initramfs +
+                                  config.txt + cmdline.txt +
+                                  ab-state.txt
+  p2: ext4 root-A    (1.7 GB)
+  p3: ext4 root-B    (1.7 GB)
+  p4: ext4 data      (rest)   — persistent across slot swaps
+```
+
+**Why it matters:** the "I upgraded my Pi and now it doesn't
+boot" experience is the worst possible failure mode for an
+appliance. A/B + watchdog makes upgrades reversible — the new
+slot fails, the watchdog reboots to the old slot, operator
+investigates from a working system.
+
+**Recipe shape:**
+
+```yaml
+os: alpine
+os_mode: ext4
+partition:
+  layout: ab            # vs. single (current default)
+  boot_size_mb: 256
+  root_size_mb: 1700    # per slot
+  data: fill            # remaining space
+ab:
+  active_slot: a        # which slot the bake populates +
+                        # boots first
+  watchdog:
+    enabled: true
+    sanity_check: /usr/local/bin/first-boot-ok
+    revert_after_sec: 120   # if check doesn't pass in 2 min,
+                            # revert
+```
+
+**Upgrade workflow** (post-bake, on the running Pi):
+- Operator uploads new .img.xz to /data
+- A `pi-bake-ab-upgrade <image.img.xz>` tool (shipped in the
+  baked image) writes the new image to the INACTIVE slot
+- Updates `/boot/ab-state.txt` to flag new slot as
+  "pending-verify"
+- Reboots
+- Bootloader (read by initramfs hook) picks the pending-verify
+  slot
+- On successful boot + sanity-check passing, ab-state moves to
+  "active"; old slot becomes "previous"
+- If sanity fails or watchdog fires, ab-state reverts to
+  previous
+
+**Implementation sketch:**
+- Partition layout: extend `_partition_image()` in
+  `alpine_ext4.py` to support 4-partition layout.
+- Slot-write at bake time: write the apkovl + bootstrap into
+  the recipe's `active_slot`. The other slot is empty.
+- Initramfs hook: small shell script that reads
+  `/boot/ab-state.txt` and edits `cmdline.txt`'s `root=`
+  on the fly before kernel exec. (Alternative: dual `root=`
+  via `kernel-cmdline` builder.)
+- Watchdog: openrc service that runs the sanity check; on
+  failure, calls `reboot` (which the initramfs sees as a
+  failed boot and reverts). Or a kernel watchdog timer
+  (more reliable) configured via /etc/conf.d/.
+- New baked tool: `/usr/local/bin/pi-bake-ab-upgrade` that
+  does the slot dance.
+
+**Why ext4 backend first, then this:** A/B needs the
+partitioned-image shape we just built in v0.3.1.
+Diskless-mode A/B is harder (apkovl + modloop on FAT make
+slot rotation messy). ext4 cleanly extends to 4-partition.
+
+**Cross-refs:**
+- [[direct-to-device-flash]] — natural consumer of A/B mode
+  (the upgrade tool writes to the inactive slot's block
+  partition directly).
+- mynotes.txt "Two OS boot with watchdog scaffold" — original
+  framing of this feature.
+
 ### HAT catalog + config.txt overlays
 
 **From:** general — needed for any Pi with PCIe HAT, sense

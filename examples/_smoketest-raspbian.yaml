@@ -1,0 +1,33 @@
+# Smoketest Raspbian recipe — Raspberry Pi OS Lite for CM4.
+# Used to validate the raspbian backend end-to-end on the lab CM4
+# after the v0.3.2 ext4 + pxe work landed.
+#
+# raspbian.py uses Pi OS Lite's permanent-latest .img.xz redirect:
+#   https://downloads.raspberrypi.com/raspios_lite_arm64_latest
+# Backend is losetup-based, REQUIRES SUDO on the bake host
+# (handled via scripts/remote-bake.sh dispatching to the privileged
+# bake host).
+#
+# Flash + boot:
+#   ./scripts/remote-bake.sh bake examples/_smoketest-raspbian.yaml
+#   # → ./out/output.img.xz on local laptop
+#   xzcat ./out/output.img.xz | sudo dd of=/dev/sdX bs=4M conv=fsync
+#   # → put SD in CM4, power-cycle
+#
+# Expected after boot: CM4 DHCPs as `td-cm4-raspbian`, sshd up,
+# `pi` user with kurt-cb's pubkey authorized.
+
+hostname: td-cm4-raspbian
+board: pi-5     # CM4 uses the same catalog entry as Pi 5
+os: raspbian
+# os_version: latest (default; permanent-latest redirect — currently
+# bookworm as of 2026-05)
+
+ssh_pubkey: ~/.ssh/totaldns-adhoc.pub
+
+network:
+  mode: dhcp
+  send_hostname: true
+
+output:
+  path: ~/sdcards/td-cm4-raspbian.img.xz

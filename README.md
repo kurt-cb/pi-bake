@@ -80,7 +80,17 @@ pi-bake build \
   --out ~/sdcards/pi-radio-1.img.gz
 
 # Flash. Replace mmcblk0 with your SD card's actual device.
-zcat ~/sdcards/pi-radio-1.img.gz | sudo dd of=/dev/mmcblk0 bs=4M status=progress
+# Local SD: zcat works directly.
+zcat ~/sdcards/pi-radio-1.img.gz | sudo dd of=/dev/mmcblk0 bs=4M status=progress conv=fsync
+
+# Remote SD via SSH (e.g. flashing a Pi already PXE-booted that
+# you'll then swap to SD-boot): use iflag=fullblock so the remote
+# dd accumulates SSH-delivered chunks into proper 4 MB writes.
+# Without it, dd short-reads per TCP packet, writes 32 KB at a
+# time, and the SD card erase-block thrash makes the flash 100x
+# slower (520 KB/s vs full speed). Discovered hands-on 2026-05-27.
+xzcat ~/sdcards/pi-radio-1.img.xz | \
+  ssh root@<remote-pi> 'dd of=/dev/mmcblk0 bs=4M iflag=fullblock conv=fsync'
 
 # Boot the Pi. Wait ~30s. Then:
 ssh root@pi-radio-1.lan uptime
