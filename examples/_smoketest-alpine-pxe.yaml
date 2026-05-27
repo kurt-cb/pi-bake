@@ -1,0 +1,30 @@
+# Smoketest PXE recipe — alpine PXE recovery tree with inline test
+# pubkey (no operator-file dependency). Used to validate the
+# alpine_pxe backend end-to-end on the lab CM4.
+#
+# Deployment path:
+#   pi-bake build --config examples/_smoketest-alpine-pxe.yaml
+#   rsync -a out/pxe-smoke/ /var/lib/tftpboot/88-a2-9e-44-31-f3/
+#   (pop SD from CM4 if EEPROM boots SD-first; reboot)
+
+hostname: smoke-pxe
+board: pi-5     # CM4 uses pi-5 catalog entry
+os: alpine
+os_mode: pxe
+os_version: 3.21.4
+
+ssh_pubkey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAItesting smoke-pxe@pi-bake"
+
+pxe:
+  # Local nginx (already set up per ngnix_setup.md) serves
+  # /var/lib/tftpboot/ at the lab subnet IP. The MAC subdir
+  # matches the CM4 in the lab.
+  server_url: http://192.168.4.2/88-a2-9e-44-31-f3
+
+network:
+  mode: dhcp
+  send_hostname: true
+
+output:
+  # Directory output for pxe mode.
+  path: ~/pibake-out/pxe-smoke

@@ -236,6 +236,50 @@ def test_bake_extracts_tarball_into_output_dir(tmp_path, monkeypatch):
     assert (out_dir / "apks" / "aarch64").is_dir()
 
 
+def test_bake_normalizes_perms_to_world_readable(tmp_path, monkeypatch):
+    """Regression — 2026-05-27 PXE boot failure. The Alpine RPi
+    tarball ships some files at mode 0o600 (notably
+    boot/initramfs-rpi). Python's `data` extraction filter
+    preserves recorded modes, so the baked tree had 600-mode
+    files owned by the operator. dnsmasq-tftp + nginx (which
+    run as non-operator users on the lab host) couldn't read
+    them → TFTP "failed sending" + HTTP 403 + kernel panic
+    because the initramfs never reached the Pi.
+
+    Fix: chmod the whole output tree to world-readable
+    (a+r on files, a+rX on dirs)."""
+    # Build a tarball where one file has restrictive 0o600 mode.
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "boot").mkdir()
+    secret = src / "boot" / "initramfs-rpi"
+    secret.write_bytes(b"fake-initramfs")
+    secret.chmod(0o600)
+    (src / "apks").mkdir()
+    (src / "apks" / "aarch64").mkdir()
+    (src / "bootcode.bin").write_bytes(b"fake-firmware")
+    tarball = tmp_path / "alpine-stub.tar.gz"
+    with tarfile.open(tarball, "w:gz") as tf:
+        for item in sorted(src.rglob("*")):
+            tf.add(item, arcname=str(item.relative_to(src)))
+    monkeypatch.setattr("pi_bake.alpine_pxe.fetch", lambda url: tarball)
+
+    out_dir = tmp_path / "out"
+    alpine_pxe.bake(
+        url="https://example/alpine.tar.gz",
+        node=_node(), out_path=out_dir,
+        pxe_server_url="http://lab/td-cm4",
+    )
+    # The 600-mode file from the tarball MUST be world-readable
+    # in the output tree, else dnsmasq-tftp + nginx can't serve it.
+    out_initramfs = out_dir / "boot" / "initramfs-rpi"
+    mode = out_initramfs.stat().st_mode & 0o777
+    assert mode & 0o044, (
+        f"initramfs perms {oct(mode)} not world-readable — "
+        f"dnsmasq-tftp/nginx will get permission-denied"
+    )
+
+
 def test_bake_strips_server_url_trailing_slash(tmp_path, monkeypatch):
     """pxe_server_url with trailing slash gets normalized so cmdline
     templates concat predictably (no double-slashes)."""

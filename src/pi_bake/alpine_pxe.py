@@ -97,6 +97,29 @@ def bake(
         except TypeError:
             tf.extractall(out_path)
 
+    # Python's `data` extraction filter preserves recorded modes
+    # which the Alpine RPi tarball happens to ship at 0o600 for
+    # some files (notably boot/initramfs-rpi). PXE clients pull
+    # via dnsmasq-tftp + HTTP via nginx — BOTH run as non-kurt-cb
+    # users on the lab host and can't read 600-mode files owned by
+    # kurt-cb. Result: TFTP "failed sending" + nginx 403 + kernel
+    # panic at userspace (no initramfs).
+    #
+    # Fix: chmod the entire output tree to a+rX (world-readable
+    # files, world-executable dirs). Hands-on-validated 2026-05-27.
+    LOG.info("normalizing tree perms to world-readable")
+    for item in out_path.rglob("*"):
+        if item.is_symlink():
+            continue
+        try:
+            cur = item.stat().st_mode
+            if item.is_dir():
+                item.chmod(cur | 0o555)   # a+rx for dirs
+            else:
+                item.chmod(cur | 0o444)   # a+r for files
+        except OSError as e:
+            LOG.warning("chmod failed on %s: %s (continuing)", item, e)
+
     # 2. Bake-time apk-fetch for operator extras (if any). This
     # mirrors alpine.py's #3 init-time-install pattern: drop the
     # operator's packages + recursive deps into the apks/ tree,
