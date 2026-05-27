@@ -36,6 +36,28 @@ If a downstream project needs a pi-bake feature, capture it in
 that pi-bake can address it in its own focused session. Don't
 just bolt it on.
 
+## Dead-end: Alpine `edge` (v0.2.1–v0.2.6, preserved on `kurt-cb/edge-mistake`)
+
+v0.2.1–v0.2.6 built a chroot+qemu-user-static+binfmt_misc
+pipeline to upgrade the Alpine RPi tarball's kernel to edge at
+bake time (motivated by Intel BE200 iwlwifi being absent from
+stable 3.21's linux-rpi-6.12.13 modloop). It was ~370 lines of
+fragile infrastructure: minirootfs download, chroot extract,
+qemu binary copy, bind mounts, apk-in-chroot, modloop squashfs
+regeneration. Each iteration uncovered another release-tooling
+quirk Alpine doesn't expose to package-install hooks.
+
+**Operator call 2026-05-26: drop BE200, evaluate AX210 (same
+iwlwifi driver family, already in stable Alpine's modloop) as
+a clean replacement.** That obviates the entire edge path.
+
+DO NOT resurrect the chroot/qemu/modloop work. If a future
+hardware item genuinely needs an Alpine kernel newer than
+stable ships, the right answer is to wait for the next Alpine
+point release, not to rebuild a kernel inside a bake-host
+chroot. The dead-end branch `kurt-cb/edge-mistake` preserves
+the v0.2.1–v0.2.6 work for archaeology.
+
 ## Current state (as of v0.2)
 
 ### What ships
@@ -58,12 +80,6 @@ just bolt it on.
   declarative input + `--to-yaml` to round-trip CLI flags into
   a normalized recipe + `--no-bake` to capture without baking.
   Strict load: unknown keys raise.
-- **Alpine `edge` OS version** — for hardware that needs newer
-  drivers than stable ships (e.g. Intel BE200 iwlwifi missing
-  from stable 3.21's linux-rpi-6.12.13 modloop; present in
-  edge's 6.12.85). Bakes use latest stable RPi tarball for
-  bootloader/FAT layout + write `edge` repos into
-  /etc/apk/repositories.
 - **Pi Zero W BCM43438 power-save fix** — auto-baked
   `/etc/local.d/wlan-power-save-off.start` when wifi is on.
 - **Bake-time apk-fetch + init-time install (v0.2 + #3)** —
@@ -253,7 +269,7 @@ src/pi_bake/
 ├── __init__.py     # public API exports
 ├── boards.py       # Pi board catalog (Board dataclass + BOARDS tuple)
 ├── oses.py         # OS catalog (OSImage dataclass + ALPINE/RASPBIAN/DEBIAN)
-│                   # resolve_image() does URL templating + edge special-case
+│                   # resolve_image() does URL templating
 ├── config.py       # NodeConfig — per-Pi inputs that go into the bake
 ├── recipe.py       # YAML recipe (Recipe dataclass + load/dump/round-trip)
 ├── alpine.py       # Alpine baker — _write_apkovl + bake() + mtools helpers
@@ -305,7 +321,7 @@ When making a non-trivial change to the apkovl:
 
 1. Bake against a real example:
    ```
-   pi-bake build --config examples/pi-5-be200-edge.yaml
+   pi-bake build --config examples/pi-5-wired-dhcp.yaml
    ```
 2. Extract the apkovl + inspect:
    ```
@@ -351,7 +367,7 @@ If any step would fail, the apkovl is wrong.
 - `599ad07` — original fix for DHCP / lbu / sftp / PAM (the
   half-dozen first-boot bugs).
 - `936f233` — switch to dhcpcd from udhcpc.
-- `e42596c` (v0.0.8) — Alpine edge + YAML recipe + power-save off.
+- `e42596c` (v0.0.8) — YAML recipe + Pi Zero W power-save off.
 - `c4ac2c1` (v0.0.9) — apk-add wholesale failure fix.
 
 ## See also

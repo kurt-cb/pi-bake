@@ -20,7 +20,7 @@
 hostname: can-pi
 board: pi-5
 os: alpine
-os_version: edge                  # mainline kernel for current SPI/CAN drivers
+os_version: 3.21.4
 
 ssh_pubkey: ~/.ssh/totaldns-adhoc.pub
 

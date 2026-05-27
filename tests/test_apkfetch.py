@@ -2,8 +2,8 @@
 
 Bake-time apk-fetch's heavy paths (downloading apk-tools-static,
 fetching real packages from upstream) are integration-tested by
-hand against `examples/pi-5-be200-edge.yaml`. The unit tests here
-cover:
+hand against any example with `packages:` populated. The unit
+tests here cover:
 
   - host arch detection
   - cached binary reuse semantics

@@ -60,7 +60,7 @@ def bake(
     Steps the operator might want to inspect: each one logs at INFO.
 
     `alpine_branch`: Alpine repo branch to write into
-        `/etc/apk/repositories` — `v3.21` (default), `edge`, etc.
+        `/etc/apk/repositories` — `v3.21` (default), `v3.20`, etc.
         Affects post-boot `apk` operations only; the bundled /apks
         cache still comes from the tarball.
 
@@ -425,11 +425,8 @@ def _write_apkovl(
 
     # /etc/apk/repositories — local FAT cache first (init's `--no-network`
     # path resolves from here), then upstream so post-boot `apk add`
-    # works for anything not in the cache. `alpine_branch` controls
-    # the upstream branch: `v3.21` (stable) or `edge` (rolling — used
-    # when the operator needs drivers/firmware only present on edge,
-    # e.g. Intel BE200 iwlwifi). Edge is rolling so reproducibility
-    # is weaker; the trade is unavoidable for edge-only hardware.
+    # works for anything not in the cache. `alpine_branch` pins the
+    # upstream branch (e.g. `v3.21`) for reproducibility.
     members.append((
         "etc/apk/repositories",
         (

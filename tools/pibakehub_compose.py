@@ -13,7 +13,6 @@ Usage:
     tools/pibakehub_compose.py \\
         --base examples/pi-5-wired-dhcp.yaml \\
         --pibakehub waveshare/m2-hat-plus \\
-        --pibakehub intel/be200 \\
         --root pibakehub-pilot/
 
 Output: the merged recipe as YAML on stdout, plus any §6.2
@@ -141,7 +140,7 @@ def _check_requires(
 
 
 # §3.2.1 ordering for Alpine.
-_ALPINE_VERSION_ORDER = ("3.19", "3.20", "3.21", "3.22", "edge")
+_ALPINE_VERSION_ORDER = ("3.19", "3.20", "3.21", "3.22")
 
 
 def _os_version_satisfies(version: str, minimum: str) -> bool:

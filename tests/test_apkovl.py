@@ -396,7 +396,7 @@ def test_extras_LAND_in_world(tmp_path):
     the full bake. It calls _write_apkovl directly without
     triggering apkfetch (which needs network + apk-tools-static).
     The end-to-end pubkey-signed flow is verified by a real bake
-    against examples/pi-5-be200-edge.yaml — see CLAUDE.md
+    against any of the shipped examples — see CLAUDE.md
     'How to verify a behavior change' section."""
     n = NodeConfig(hostname="pi", ssh_pubkey=_PUBKEY)
     extras = ["avahi", "dbus", "linux-firmware-intel"]
@@ -539,8 +539,7 @@ def test_ssh_host_key_unknown_type_rejected():
 # (The v0.2-era `install-extras.start` script tests were removed by #3.       #
 #  Init-time install via signed APKINDEX replaces it — see                    #
 #  test_extras_LAND_in_world / test_signing_pubkey_baked_into_keys_dir above. #
-#  End-to-end signing verified by real bakes against                          #
-#  examples/pi-5-be200-edge.yaml, not unit-tested here.)                      #
+#  End-to-end signing verified by real bakes, not unit-tested here.)          #
 # --------------------------------------------------------------------------- #
 
 

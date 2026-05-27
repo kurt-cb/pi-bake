@@ -7,7 +7,7 @@ versions get assigned at tag time, not here.
 | #  | State | Item |
 |---:|:-----:|:-----|
 |  1 |  ✅   | [YAML recipes (`--config <yaml>` + `--to-yaml`)](#1-yaml-recipes) |
-|  2 |  ✅   | [Alpine `edge` OS version](#2-alpine-edge-os-version) |
+|  2 |  ❌   | [~~Alpine `edge` OS version~~ (dead-ended; see CLAUDE.md)](#2-alpine-edge-os-version-dead-ended) |
 |  3 |  ✅   | [Pre-baked SSH host keys](#3-pre-baked-ssh-host-keys) |
 |  4 |  ✅   | [Bake-time apk-fetch (offline first boot — init-time install)](#4-bake-time-apk-fetch-offline-first-boot) |
 |  5 |  ✅   | [pibakehub v1 frozen design + 8-fragment pilot](#5-pibakehub-v1-frozen-design--pilot) |
@@ -23,7 +23,7 @@ versions get assigned at tag time, not here.
 | 15 |  ⏸   | [Generalized recovery layer (waits for 2nd downstream asker)](#15-generalized-recovery-layer) |
 | 16 |  ⬜   | [Operator-controlled FAT contents (extended backups, scratch)](#16-operator-controlled-fat-contents) |
 
-**State key:** ✅ shipped · 🟡 partial (code in, hardware verification or extra step pending) · 🚧 in flight · 🔴 blocked (on another item) · ⬜ not started · ⏸ deferred (won't pick up without more signal)
+**State key:** ✅ shipped · 🟡 partial (code in, hardware verification or extra step pending) · 🚧 in flight · 🔴 blocked (on another item) · ⬜ not started · ⏸ deferred (won't pick up without more signal) · ❌ dead-ended (deliberately abandoned)
 
 ---
 
@@ -43,7 +43,7 @@ Shape (full annotated reference: [`pi-bake.example.yaml`](pi-bake.example.yaml))
 hostname: td-pi5-1
 board: pi-5
 os: alpine
-os_version: edge                   # optional; defaults to latest known-good
+os_version: 3.21.4                 # optional; defaults to latest known-good
 ssh_pubkey: ~/.ssh/totaldns-adhoc.pub
 network:
   mode: dhcp                       # or "static" with address+gateway
@@ -53,7 +53,7 @@ wifi:                              # optional — omit for wired-only
   psk: secret
 packages:                          # extras (see #4 for offline-install path)
   - avahi
-  - linux-firmware-intel
+  - dbus
 output:
   path: ~/sdcards/td-pi5-1.img.gz
 ```
@@ -66,28 +66,33 @@ with the operator-facing field name. A typo like
 Tested recipes shipped under [`examples/`](examples/):
 - `pi-zero-2-w-wifi-station.yaml`
 - `pi-5-wired-dhcp.yaml`
-- `pi-5-be200-edge.yaml` (Alpine edge for iwlwifi)
 - `pi-zero-w-armhf.yaml`
+- `pi-5-can-rs485.yaml`
 
 ---
 
-## 2. Alpine `edge` OS version
-**✅ shipped**
+## 2. Alpine `edge` OS version (dead-ended)
+**❌ dead-ended 2026-05-26 — preserved on branch `kurt-cb/edge-mistake` (tags v0.2.1–v0.2.6)**
 
-`os_version: edge` (or `--version edge`) uses the latest stable
-Alpine RPi tarball for the bootloader/FAT layout but points
-`/etc/apk/repositories` at `edge`. Post-boot `apk upgrade` rolls
-kernel + drivers + firmware forward to edge versions.
+The v0.0.8 design wrote edge repos into `/etc/apk/repositories`
+and assumed post-boot `apk upgrade` would roll the kernel
+forward. It didn't — FAT and modloop are read-only at runtime,
+the linux-rpi install hooks don't fire outside `setup-alpine`,
+and the running Pi has no mkinitfs. v0.2.1–v0.2.6 tried to do
+the upgrade at bake time via chroot + qemu-user-static +
+binfmt_misc + manual modloop regeneration. That's ~370 lines of
+fragile infrastructure that broke once per release.
 
-Motivation: stable 3.21's `linux-rpi-6.12.13` modloop strips the
-entire `wireless/intel/` subtree (no `iwlwifi.ko`) despite
-`bcm2711_defconfig` having `CONFIG_IWLWIFI=m`. Edge's
-`linux-rpi-6.12.85` ships it, plus `linux-firmware-intel` carries
-the BE200 firmware blobs.
+Motivation was a single HAT (Intel BE200 iwlwifi missing from
+stable 3.21's linux-rpi-6.12.13 modloop). Operator call: drop
+BE200, evaluate AX210 (same iwlwifi driver family, present in
+stable's modloop). One HAT does not justify a kernel-rebuild
+pipeline inside the baker.
 
-Trade-off: edge is rolling. Reproducibility weaker. For an
-appliance needing an edge-only kernel feature, unavoidable; pin
-the snapshot date at bake time when possible.
+If a future hardware item needs an Alpine kernel newer than
+stable ships, wait for the next Alpine point release. Don't
+resurrect the chroot/qemu/modloop work. The dead-end branch
+preserves the source for archaeology.
 
 ---
 
@@ -152,7 +157,7 @@ Shipped artifacts:
 - [`design/pibakehub-v1.md`](design/pibakehub-v1.md) — frozen v1
   design with stable §N.M.K.J numbering for forever-references.
 - [`pibakehub-pilot/`](pibakehub-pilot/) — 7 scraped Waveshare
-  HAT fragments + 1 verified `intel/be200` fragment.
+  HAT fragments.
 - [`tools/pibakehub_compose.py`](tools/pibakehub_compose.py) —
   ~350-LOC composition prototype: loads fragments, validates §3
   schema, composes per §4, surfaces §6.2 untested warnings,
@@ -255,8 +260,8 @@ Bake-time steps when `packages:` is non-empty:
    baseline. `/etc/local.d/install-extras.start` is no longer
    generated (deleted entirely from `_write_apkovl`).
 
-End-to-end verified: bake of `examples/pi-5-be200-edge.yaml`
-produces a 211 MB image with:
+End-to-end verified: bake with `packages:` populated produces
+a ~211 MB image with:
 - 163-package signed APKINDEX (100 stock + 63 extras incl.
   deps)
 - `etc/apk/world` listing all 14 packages (baseline + extras)
@@ -390,16 +395,16 @@ same `dump_recipe()`, optionally bakes:
 pi-bake build --interactive
   ? Which board? (pi-5, pi-zero-2-w, …)        > pi-5
   ? Which OS? (alpine, raspbian, …)            > alpine
-  ? OS version (latest | edge | 3.21.4)        > edge
+  ? OS version (latest | 3.21.4)               > latest
   ? Hostname?                                   > td-pi5-1
   ? SSH pubkey path? (Tab to browse)           > ~/.ssh/totaldns-adhoc.pub
   ? WiFi? [y/N]                                 > N
   ? Static IP? [y/N]                            > y
     ? CIDR?                                     > 192.168.4.111/24
     ? Gateway?                                  > 192.168.4.1
-  ? Extra packages? (comma-sep)                 > avahi, dbus, linux-firmware-intel
+  ? Extra packages? (comma-sep)                 > avahi, dbus
   ? HATs / expansion? (multi-select)
-      [x] Intel BE200 M.2 WiFi 7 (PCIe HAT)
+      [x] Waveshare M.2 HAT+ (PCIe slot)
       [ ] PoE+ HAT (Pi 5)
       [ ] Sense HAT
       [ ] Adafruit 2.8" PiTFT 320x240

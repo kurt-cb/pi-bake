@@ -133,7 +133,7 @@ class Recipe:
     Required: hostname, board, os, ssh_pubkey, output.path.
     Everything else has a default.
 
-    `os_version`: explicit OS version (e.g. "3.21.4", "edge",
+    `os_version`: explicit OS version (e.g. "3.21.4",
     "bookworm"). Empty/None → latest known-good for `os`.
 
     `extra_pubkeys`: list of paths OR inline pubkey strings;

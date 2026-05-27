@@ -1,9 +1,9 @@
 """Top-level bake dispatcher.
 
 Routes `(board, os)` to the right backend module + verifies the
-combo is on the supported edge list before going anywhere near
-the network. The CLI calls this; the Python API also exports it
-via `pi_bake.build()`.
+combo is supported before going anywhere near the network. The
+CLI calls this; the Python API also exports it via
+`pi_bake.build()`.
 """
 from __future__ import annotations
 
@@ -74,13 +74,8 @@ def build(
     backend = o.bake_backend
     if backend == "alpine":
         from pi_bake import alpine
-        # Alpine repositories branch: `edge` keeps the rolling label,
-        # everything else gets the `v3.21`-style prefix.
-        if resolved_version == "edge":
-            alpine_branch = "edge"
-        else:
-            minor = ".".join(resolved_version.split(".")[:2])
-            alpine_branch = f"v{minor}"
+        minor = ".".join(resolved_version.split(".")[:2])
+        alpine_branch = f"v{minor}"
         kwargs = {
             "url": url, "node": node, "out_path": Path(out_path),
             "alpine_branch": alpine_branch,

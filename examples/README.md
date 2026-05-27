@@ -8,8 +8,8 @@ editing.
 |------|-------|
 | [`pi-zero-2-w-wifi-station.yaml`](pi-zero-2-w-wifi-station.yaml) | Pi Zero 2 W joining an existing SSID via DHCP. The smallest useful recipe. |
 | [`pi-5-wired-dhcp.yaml`](pi-5-wired-dhcp.yaml) | Pi 5 on wired ethernet via DHCP. Used as the §25 hardware lab's totaldns-server platform. |
-| [`pi-5-be200-edge.yaml`](pi-5-be200-edge.yaml) | Pi 5 on Alpine `edge` to unlock the Intel BE200's `iwlwifi` driver (absent from stable 3.21). |
 | [`pi-zero-w-armhf.yaml`](pi-zero-w-armhf.yaml) | Original Pi Zero W (32-bit ARMv6 — the only board still needing armhf Alpine). |
+| [`pi-5-can-rs485.yaml`](pi-5-can-rs485.yaml) | Pi 5 with the Waveshare RS485-CAN HAT — overlay/modules pattern. |
 
 For every field in every form, see [`pi-bake.example.yaml`](../pi-bake.example.yaml)
 at the repo root.

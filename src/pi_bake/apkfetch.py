@@ -60,7 +60,7 @@ LOG = logging.getLogger("pi_bake.apkfetch")
 # Pinned apk-tools-static. Bumped manually when a newer release
 # tests cleanly. Pinning > dynamic discovery: deterministic, works
 # offline after first download, simpler. The package is available
-# from main on every Alpine branch including edge.
+# from main on every supported Alpine branch.
 APK_STATIC_VERSION = "2.14.6-r3"
 APK_STATIC_BRANCH = "v3.21"
 
@@ -192,8 +192,8 @@ def fetch_packages(
 ) -> list[str]:
     """Fetch `packages` + recursive deps into `out_dir` as .apk files.
 
-    Pulls from Alpine main + community for `alpine_branch` (`v3.21`,
-    `edge`, etc.). Cross-arch via apk.static's `--arch`. Verifies
+    Pulls from Alpine main + community for `alpine_branch` (e.g.
+    `v3.21`). Cross-arch via apk.static's `--arch`. Verifies
     upstream signatures using `keys_dir`. Raises with full apk
     stderr on failure (no silent fallback — operator opted in to
     bake-time fetch, so a failure should surface, not regress to

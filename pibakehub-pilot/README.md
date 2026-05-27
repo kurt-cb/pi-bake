@@ -10,19 +10,17 @@ for status.
 ```
 pibakehub-pilot/
 ├── README.md                          # this file
-├── waveshare/
-│   ├── poe-hat-f/fragment.yaml        # SCRAPED (untested)
-│   ├── m2-hat-plus/fragment.yaml      # SCRAPED (untested)
-│   ├── wm8960-audio-hat/fragment.yaml # SCRAPED (untested)
-│   ├── rs485-can-hat/fragment.yaml    # SCRAPED (untested)
-│   ├── fan-hat/fragment.yaml          # SCRAPED (untested)
-│   ├── power-management-hat/fragment.yaml  # SCRAPED (untested)
-│   └── ai-hat-plus/fragment.yaml      # SCRAPED (untested)
-└── intel/
-    └── be200/fragment.yaml            # VERIFIED on pi-5 + alpine edge
+└── waveshare/
+    ├── poe-hat-f/fragment.yaml        # SCRAPED (untested)
+    ├── m2-hat-plus/fragment.yaml      # SCRAPED (untested)
+    ├── wm8960-audio-hat/fragment.yaml # SCRAPED (untested)
+    ├── rs485-can-hat/fragment.yaml    # SCRAPED (untested)
+    ├── fan-hat/fragment.yaml          # SCRAPED (untested)
+    ├── power-management-hat/fragment.yaml  # SCRAPED (untested)
+    └── ai-hat-plus/fragment.yaml      # SCRAPED (untested)
 ```
 
-## Why these 7 + 1
+## Why these 7
 
 Seven Waveshare HATs were scraped from
 [waveshare.com/wiki](https://www.waveshare.com/wiki/Main_Page) on
@@ -34,16 +32,10 @@ Seven Waveshare HATs were scraped from
 - **SPI + UART overlays**: `rs485-can-hat`.
 - **I2S codec + DKMS driver**: `wm8960-audio-hat`.
 
-Plus one **non-Waveshare, operator-verified** fragment:
-
-- `intel/be200` — Wi-Fi 7 M.2 module, verified on the same Pi 5 +
-  Alpine edge bake that motivated the v0.2 air-gap apk-fetch work.
-
-The 7 Waveshare fragments carry `provenance:` blocks (scraped
-from manufacturer wiki, untested) and NO `verified_on:` entries.
-When pi-bake's CLI lands `--pibakehub`, bakes using them will
-emit the §6.2 warning. `intel/be200` is the example of what
-"verified" looks like.
+All fragments carry `provenance:` blocks (scraped from
+manufacturer wiki, untested) and NO `verified_on:` entries. When
+pi-bake's CLI lands `--pibakehub`, bakes using them will emit
+the §6.2 warning until a verified fragment lands.
 
 ## How to use the prototype
 
@@ -54,7 +46,6 @@ script:
 python3 tools/pibakehub_compose.py \
     --base examples/pi-5-wired-dhcp.yaml \
     --pibakehub waveshare/m2-hat-plus \
-    --pibakehub intel/be200 \
     --root pibakehub-pilot/
 ```
 

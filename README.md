@@ -123,7 +123,7 @@ References:
   for every field, dnsmasq-style. Read once, never go hunting for
   options again.
 - [`examples/`](examples/) — minimal, tested recipes for common
-  shapes (wifi-station, wired AP, BE200 host on Alpine edge).
+  shapes (wifi-station, wired AP, CAN/RS485 HAT).
 
 Validate a recipe without baking:
 

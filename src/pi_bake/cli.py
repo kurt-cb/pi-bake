@@ -285,8 +285,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_b.add_argument("--os", dest="os_name",
                      help="alpine | raspbian | debian")
     p_b.add_argument("--version",
-                     help="OS version (default: latest known-good; "
-                          "Alpine: `edge` for newer drivers, e.g. iwlwifi)")
+                     help="OS version (default: latest known-good)")
     p_b.add_argument("--hostname",
                      help="DNS-label-safe hostname")
     p_b.add_argument("--ssh-pubkey", metavar="PATH",

@@ -68,7 +68,7 @@ def test_full_yaml_loads(tmp_path):
 hostname: td-pi5-1
 board: pi-5
 os: alpine
-os_version: edge
+os_version: 3.21.4
 timezone: America/New_York
 ssh_pubkey: "{_PUBKEY}"
 extra_pubkeys:
@@ -90,7 +90,7 @@ output:
   image_size_mb: 800
 """
     r = _write_and_load(tmp_path, body)
-    assert r.os_version == "edge"
+    assert r.os_version == "3.21.4"
     assert r.timezone == "America/New_York"
     assert r.network.mode == "static"
     assert r.network.address == "192.168.4.111/24"
@@ -209,7 +209,7 @@ def test_round_trip_minimal(tmp_path):
 
 def test_round_trip_with_wifi_and_packages(tmp_path):
     r1 = Recipe(
-        hostname="td", board="pi-5", os="alpine", os_version="edge",
+        hostname="td", board="pi-5", os="alpine", os_version="3.21.4",
         ssh_pubkey=_PUBKEY,
         extra_pubkeys=[_PUBKEY],
         network=NetworkSpec(mode="static", address="10.0.0.5/24", gateway="10.0.0.1"),
@@ -244,7 +244,6 @@ def test_dump_canonical_form_idempotent(tmp_path):
 @pytest.mark.parametrize("name", [
     "pi-zero-2-w-wifi-station.yaml",
     "pi-5-wired-dhcp.yaml",
-    "pi-5-be200-edge.yaml",
     "pi-zero-w-armhf.yaml",
     "pi-5-can-rs485.yaml",
 ])
@@ -327,16 +326,6 @@ def test_recipe_static_network_maps_to_nodeconfig():
     node, _ = recipe_to_node_config(r)
     assert node.static_ipv4 == "1.2.3.4/24"
     assert node.gateway_ipv4 == "1.2.3.1"
-
-
-def test_recipe_edge_version_passes_through():
-    r = Recipe(
-        hostname="t", board="pi-5", os="alpine", os_version="edge",
-        ssh_pubkey=_PUBKEY,
-        output=OutputSpec(path="/tmp/x.img.gz"),
-    )
-    _, kwargs = recipe_to_node_config(r)
-    assert kwargs["version"] == "edge"
 
 
 # --------------------------------------------------------------------------- #
