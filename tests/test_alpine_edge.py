@@ -111,12 +111,20 @@ def test_passes_when_all_deps_present(monkeypatch):
 
 
 def test_constants_well_formed():
-    """Catch typos in the edge repo URLs + package list."""
+    """Catch typos in the edge repo URLs + package list.
+
+    NOTE: `linux-firmware-rpi` is intentionally absent — there's
+    no such Alpine package. Hardware-specific firmware blobs
+    (linux-firmware-brcm, linux-firmware-intel, ...) live in the
+    operator's recipe.packages list, not in the bake-host
+    chroot's upgrade set."""
     assert alpine_edge.EDGE_REPO_MAIN.endswith("/edge/main")
     assert alpine_edge.EDGE_REPO_COMMUNITY.endswith("/edge/community")
     assert "linux-rpi" in alpine_edge.EDGE_UPGRADE_PACKAGES
-    assert "linux-firmware-rpi" in alpine_edge.EDGE_UPGRADE_PACKAGES
     assert "mkinitfs" in alpine_edge.EDGE_UPGRADE_PACKAGES
+    # Regression: the fictional linux-firmware-rpi was in v0.2.2
+    # and v0.2.4 and broke `apk add` with 'no such package'.
+    assert "linux-firmware-rpi" not in alpine_edge.EDGE_UPGRADE_PACKAGES
 
 
 # --------------------------------------------------------------------------- #

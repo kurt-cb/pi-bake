@@ -88,10 +88,17 @@ EDGE_REPO_MAIN = "http://dl-cdn.alpinelinux.org/alpine/edge/main"
 EDGE_REPO_COMMUNITY = "http://dl-cdn.alpinelinux.org/alpine/edge/community"
 
 # Packages installed (with edge repos active) to bring in the
-# edge kernel + firmware + boot-artefact generator. mkinitfs's
-# install hook regenerates /boot/{vmlinuz-rpi,initramfs-rpi,
-# modloop-rpi} when linux-rpi installs.
-EDGE_UPGRADE_PACKAGES = ("mkinitfs", "linux-rpi", "linux-firmware-rpi")
+# edge kernel + boot-artefact generator. mkinitfs's install hook
+# regenerates /boot/{vmlinuz-rpi,initramfs-rpi,modloop-rpi} when
+# linux-rpi installs.
+#
+# NO `linux-firmware-rpi` here — that's not an Alpine package.
+# Hardware-specific firmware blobs (linux-firmware-brcm for Pi
+# onboard wifi, linux-firmware-intel for BE200, etc.) go into
+# the operator's recipe.packages list, which gets fetched +
+# installed at INIT TIME on the Pi via the apk_fetch path. The
+# chroot here just rebuilds the kernel artefacts.
+EDGE_UPGRADE_PACKAGES = ("mkinitfs", "linux-rpi")
 
 # Boot artefacts we copy OUT of the chroot INTO the RPi tarball
 # tree after the upgrade. Order: kernel, initramfs, kernel-module
