@@ -166,7 +166,16 @@ def extract_initramfs_keys(extracted_tarball: Path, out_dir: Path) -> Path:
         )
         assert p.stdin is not None
         shutil.copyfileobj(gz, p.stdin)
-        p.stdin.close()
+        # DON'T manually `p.stdin.close()` here. On CPython 3.12,
+        # subprocess.communicate() unconditionally calls
+        # `self.stdin.flush()` on its first invocation — which raises
+        # ValueError("flush of closed file") if stdin is already
+        # closed. CPython 3.14 happens to no-op the flush on a closed
+        # handle, so this only manifests on Alpine 3.22's stock
+        # Python 3.12. communicate() flushes + closes stdin itself,
+        # which signals EOF to cpio.
+        # (Reproduced 2026-05-27 by totaldns operator; feature_request.md
+        # has the original bug report.)
         _, err = p.communicate()
         if p.returncode != 0:
             raise RuntimeError(

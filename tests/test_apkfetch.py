@@ -80,6 +80,53 @@ def test_extract_initramfs_keys_missing_tarball(tmp_path):
         apkfetch.extract_initramfs_keys(tmp_path, tmp_path / "out")
 
 
+def test_extract_initramfs_keys_no_premature_stdin_close():
+    """Regression — 2026-05-27 totaldns operator hit "flush of
+    closed file" on Alpine 3.22 (Python 3.12) when this code path
+    pre-closed `p.stdin` before calling `p.communicate()`.
+
+    Python 3.12's subprocess.communicate() unconditionally calls
+    `self.stdin.flush()` first; on an already-closed BufferedWriter
+    that raises `ValueError('flush of closed file')`. Python 3.14
+    happens to no-op the flush, hiding the bug on newer hosts.
+
+    The body of `extract_initramfs_keys` must NOT include
+    `p.stdin.close()` — communicate() handles the flush + close
+    itself and signals EOF to cpio that way."""
+    # AST-level guard: parse the module, find the function, walk
+    # its body for any call matching `<x>.stdin.close()` or
+    # `<x>.stdin.close(*args)`. Comments + docstrings are NOT
+    # parsed as call nodes so this catches the real bug pattern.
+    import ast
+    src = Path(apkfetch.__file__).read_text()
+    tree = ast.parse(src)
+    func = next(
+        (n for n in tree.body
+         if isinstance(n, ast.FunctionDef)
+         and n.name == "extract_initramfs_keys"),
+        None,
+    )
+    assert func is not None, "extract_initramfs_keys missing from apkfetch.py"
+    for node in ast.walk(func):
+        if not isinstance(node, ast.Call):
+            continue
+        f = node.func
+        # Match `X.stdin.close` — i.e. Attribute(attr="close",
+        # value=Attribute(attr="stdin", value=...))
+        if (isinstance(f, ast.Attribute)
+                and f.attr == "close"
+                and isinstance(f.value, ast.Attribute)
+                and f.value.attr == "stdin"):
+            raise AssertionError(
+                f"extract_initramfs_keys calls `{ast.unparse(f)}()` at "
+                f"line {node.lineno} — must NOT pre-close stdin before "
+                f"p.communicate(). communicate() flushes+closes stdin "
+                f"itself; pre-closing causes ValueError(\"flush of "
+                f"closed file\") on CPython 3.12. See git blame for the "
+                f"2026-05-27 fix."
+            )
+
+
 @pytest.mark.skipif(
     not (Path.home() / ".cache" / "pi-bake"
          / "alpine-rpi-3.21.4-aarch64.tar.gz").is_file(),
