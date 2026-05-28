@@ -923,6 +923,58 @@ slot rotation messy). ext4 cleanly extends to 4-partition.
 - mynotes.txt "Two OS boot with watchdog scaffold" — original
   framing of this feature.
 
+### USB-boot prep: BOOT_ORDER + bake docs
+
+**From:** pi-bake session — 2026-05-28. Surfaced after the
+hardware validation loop, watching dd-to-SD on the CM4 trickle
+at 0.5 MB/s while the same SD card + same `.img.xz` flashed at
+16.3 MB/s on a laptop USB reader. CM4's SD path is the
+bottleneck (likely the IO board's SD signal integrity forcing
+the controller down to a legacy mode); the SD card itself is
+spec'd correctly (V20 = ≥20 MB/s sustained).
+
+**The shape:** USB boot dodges the slow SD path entirely. Pi-bake's
+output (an `.img.xz`) is already flashable to any block device, so
+this isn't a new backend — it's a documentation + workflow story:
+
+1. Operator wires `BOOT_ORDER` in the Pi's EEPROM to prefer USB
+   (`0xf41` = SD → USB → SD → ... repeating; `0xf14` = USB-first).
+2. Operator dd's the same baked image to a USB SSD/HDD instead
+   of an SD card.
+3. Pi boots from USB at ~35 MB/s read (USB 2.0 on CM4) — 70× faster
+   than the slow SD path. Pi 4/5 with USB 3.0 → ~400 MB/s.
+
+**Why this matters:** the iteration loop "bake → flash → boot →
+debug" eats 5-10 minutes per cycle when SD takes ~2 minutes to
+flash and the Pi boots slowly. USB-boot cuts the flash to ~10
+seconds and the boot to faster (sequential reads matter for
+modloop + apk install). For development this is a 5× workflow
+speedup.
+
+**What pi-bake should provide:**
+
+- **README / docs:** a "use USB instead of SD" section with the
+  one-time EEPROM-config step using `rpi-eeprom-config` (needs
+  Raspbian — works with our raspbian backend) and the dd command
+  with `/dev/sdX` instead of `/dev/mmcblkN`.
+- **Optional baked-in EEPROM update:** when `os: raspbian` is
+  selected, pi-bake could bake a recipe field like
+  `eeprom: { boot_order: usb-first }` that drops an
+  `rpi-eeprom-config` snippet + first-boot service onto the
+  image to apply at first boot. Useful for shipping
+  ready-to-go USB-boot SD cards (operator flashes SD ONCE,
+  Pi auto-updates EEPROM on first boot, subsequent boots are
+  USB).
+- **Catalog mention:** `oses.py` notes could call out which
+  boards support USB boot natively (Pi 4 / Pi 5 / CM4 with
+  recent EEPROM) and which don't (Pi Zero series).
+
+**Cross-refs:**
+- [[direct-to-device-flash]] — when `output.path: /dev/sdX` lands,
+  flashing to USB becomes a single pi-bake invocation.
+- [[ab-slot-boot]] — A/B slot writes pair naturally with USB
+  storage (more space, faster writes for the inactive slot).
+
 ### HAT catalog + config.txt overlays
 
 **From:** general — needed for any Pi with PCIe HAT, sense
