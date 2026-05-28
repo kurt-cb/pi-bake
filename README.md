@@ -40,11 +40,13 @@ sudo apt install mtools dosfstools xz-utils util-linux openssl tar cpio
 apk add mtools dosfstools xz util-linux openssl tar cpio
 ```
 
-Tooling by backend:
+Tooling by backend + mode (`os_mode:`):
 
-| Backend | Tools | Root? |
+| Backend / mode | Tools | Root? |
 |---------|-------|-------|
-| **Alpine** | mtools + dosfstools + tar + cpio + openssl + ssh-keygen | NO |
+| **Alpine** default (`os_mode: diskless`, or unset) | mtools + dosfstools + tar + cpio + openssl + ssh-keygen | NO |
+| **Alpine `os_mode: ext4`** (sys-mode, partitioned image) | losetup + mount + sfdisk + mkfs.vfat + mkfs.ext4 + xz + (above) | **YES** |
+| **Alpine `os_mode: pxe`** (TFTP+HTTP tree, no flashable image) | tar + cpio + openssl + ssh-keygen | NO |
 | **Raspbian / Debian / Fedora** | xz + losetup + mount + partprobe + lsblk + ssh-keygen | **YES** (losetup needs CAP_SYS_ADMIN) |
 
 For the sudo-requiring backends, the typical operator setup is
@@ -166,10 +168,30 @@ Run `pi-bake list-os --board <b>` for the current matrix.
 ## Status
 
 All four backends (Alpine, Raspbian, Debian, Fedora) are
-working as of v0.3. Alpine is the no-root, mtools-based path
-(easiest to run from any Linux host). Raspbian / Debian / Fedora
-use losetup + mount and require sudo (typically via LXC — see
-above).
+working as of v0.3.3 and have been hardware-validated on a CM4.
+
+Alpine has three modes:
+
+- **`os_mode: diskless`** (default) — no-root, mtools-based,
+  fast, apkovl-overlay shape. Easiest to run from any Linux host.
+- **`os_mode: ext4`** (v0.3.1+) — sys-mode Alpine on a real
+  partitioned image. Requires sudo. The ONLY mode that supports
+  `os_version: edge`, and the cleanest base for in-place
+  `apk upgrade linux-rpi`. See
+  [examples/pi-5-alpine-ext4.yaml](examples/pi-5-alpine-ext4.yaml).
+- **`os_mode: pxe`** (v0.3.2+) — network-boot recovery tree
+  (TFTP+HTTP). Output is a directory, not a flashable image —
+  operator deploys to `/var/lib/tftpboot/<mac>/`. Lab needs
+  nginx (see [ngnix_setup.md](ngnix_setup.md)) +
+  dnsmasq-tftp. See
+  [examples/pi-cm4-alpine-pxe.yaml](examples/pi-cm4-alpine-pxe.yaml).
+
+Raspbian / Debian / Fedora use losetup + mount and require sudo
+(typically via LXC — see above).
+
+See [release_notes.md](release_notes.md) for a per-version
+summary of what shipped and [ROADMAP.md](ROADMAP.md) for the
+planned + done list.
 
 ## Python API
 
@@ -195,16 +217,24 @@ build(
 ## Roadmap
 
 See [ROADMAP.md](ROADMAP.md) for the numbered backlog + state
-table. Highlights:
+table. Highlights of what's NOT yet shipped:
 
-- **Dynamic OS version discovery.** Pull
+- **#17 — A/B rootfs + watchdog auto-revert.** Two root
+  partitions; the watchdog reverts to the last-good slot if
+  the new image fails its sanity check. Solves the "deploy
+  bricks the Pi" failure mode.
+- **#18 — Secure boot (verified boot chain).** U-Boot + FIT
+  verified-boot for operators with physical-tamper threat
+  models. Opt-in.
+- **#14 — Dynamic OS version discovery.** Pull
   `https://dl-cdn.alpinelinux.org/alpine/` and the rpi downloads
   index instead of the hardcoded `versions` tuples in the catalog.
-- **v0.3 — multi-image batch.** `pi-bake build-many topology.json`
-  emits an `.img.gz` per node entry in one go.
-- **v0.3 — static IP option.** Today we DHCP from first reachable
-  iface; static-IP-only deployments need a `--static-v4` flag.
-- **v0.3 — encrypted overlay** for the rootfs (LUKS).
+- **#13 — Interactive `--interactive` wizard** as a third entry
+  point alongside flags + `--config`.
+
+See [feature_request.md](feature_request.md) for design gaps
++ bugs surfaced during real-world use (candidate pool for the
+roadmap).
 
 ## Why does this exist
 

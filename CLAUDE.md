@@ -382,10 +382,27 @@ If any step would fail, the apkovl is wrong.
 ## Release flow
 
 - Version is dynamic from latest git tag via setuptools_scm.
-- `git tag v0.0.N && git push --tags` triggers
+- `git tag -a vX.Y.Z -m "..."` + `git push --tags` triggers
   `.github/workflows/workflow.yml` which builds + publishes via
   PyPI Trusted Publishing (OIDC, no secrets).
 - Commits are atomic + descriptive — see existing log for style.
+
+**Tag-time checklist** (Claude: do all four BEFORE pushing the tag):
+
+1. **Write the annotated tag message** with the full release
+   notes — what shipped, why, how to verify, gotchas. The tag
+   annotation is the source of truth; `scripts/release-notes.sh`
+   reads it to regenerate `CHANGELOG.md`.
+2. **Update [release_notes.md](release_notes.md)** with a new
+   section for the version. ONE paragraph per major feature,
+   linking out to ROADMAP item + example recipe + design doc.
+   Update the "Quick reference" table at the top.
+3. **Regenerate `CHANGELOG.md`** by running
+   `./scripts/release-notes.sh`. Commit both updated docs.
+4. **Update [ROADMAP.md](ROADMAP.md)** state markers — anything
+   that just shipped flips to ✅. Anything blocked-on-the-new-
+   thing flips to its appropriate state. The tag annotation
+   should cross-reference the ROADMAP items it implements.
 
 ## Commits to read for context
 
