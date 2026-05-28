@@ -22,6 +22,8 @@ versions get assigned at tag time, not here.
 | 14 |  ⬜   | [Dynamic upstream version discovery](#14-dynamic-version-discovery) |
 | 15 |  ⏸   | [Generalized recovery layer (waits for 2nd downstream asker)](#15-generalized-recovery-layer) |
 | 16 |  ⬜   | [Operator-controlled FAT contents (extended backups, scratch)](#16-operator-controlled-fat-contents) |
+| 17 |  ⬜   | [A/B rootfs with watchdog auto-revert](#17-ab-rootfs-with-watchdog-auto-revert) |
+| 18 |  ⏸   | [Secure boot (verified boot chain — opt-in for stronger threat models)](#18-secure-boot) |
 
 **State key:** ✅ shipped · 🟡 partial (code in, hardware verification or extra step pending) · 🚧 in flight · 🔴 blocked (on another item) · ⬜ not started · ⏸ deferred (won't pick up without more signal) · ❌ dead-ended (deliberately abandoned)
 
@@ -482,6 +484,213 @@ output:
 #12 already lists `fat_files:` as a schema-implied-but-not-
 honored field; #16 is the explicit feature with a concrete use
 case (operator-managed FAT contents at any size).
+
+---
+
+## 17. A/B rootfs with watchdog auto-revert
+**⬜ not started**
+
+The motivation isn't "two slots" for its own sake — it's the
+**watchdog auto-revert** that an A/B layout enables. When a
+deploy ships a broken image, today's pi-bake operator finds
+out via a brick: SSH stops working, no way back without
+physical SD access. With A/B + watchdog the deploy reboots
+into the new slot, fails its sanity check, the watchdog
+reverts to the previous slot, and the operator finds out via
+"the new image rolled back" instead of "I need to drive to
+the lab."
+
+### Image shape
+
+Per #16's flexible FAT sizing, the recipe opts into a
+4-partition layout:
+
+```yaml
+os: alpine                            # or raspbian / debian
+os_mode: ext4                         # A/B is sys-mode only —
+                                      # diskless's modloop-on-FAT
+                                      # doesn't admit slot rotation
+partition:
+  layout: ab                          # default `single` keeps
+                                      # current behavior
+  boot_size_mb: 256
+  root_size_mb: 1700                  # PER slot
+  data: fill                          # remaining space
+ab:
+  active_slot: a                      # which slot pi-bake
+                                      # populates as active.
+                                      # B gets the same content
+                                      # at prep time (so the
+                                      # first watchdog revert
+                                      # always lands on a
+                                      # known-good slot).
+  watchdog:
+    enabled: true
+    sanity_check: /usr/local/bin/first-boot-ok
+    revert_after_sec: 120
+```
+
+On-disk layout:
+- p1: FAT `/boot` (256 MB) — Pi firmware + kernel + initramfs +
+  DTBs + `cmdline.txt` + `ab-state.txt`
+- p2: ext4 `root-A` (`root_size_mb`)
+- p3: ext4 `root-B` (same size)
+- p4: ext4 `data` (fill) — persists across slot swaps:
+  ssh host keys (avoid the apkovl-style regeneration), operator
+  data, var/log if you want it across the boundary
+
+### Two pi-bake outputs
+
+1. **Prep image** (full disk, default `pi-bake build` output) —
+   what you flash once. Partitioned, both root slots populated
+   identically, FAT seeded with first-boot ab-state.
+2. **Update image** (partition-only, `output.mode: partition`)
+   — what an OTA push or remote redeploy uses. Just the active
+   slot's ext4 + a tiny manifest. Operator's upgrade tool dd's
+   this to the inactive partition; pi-bake never touches the
+   prep image's partition table or the OTHER slot.
+
+This "pi-bake knows it's writing a partition image, not a disk
+image" mode is the implementation knob that distinguishes the
+two artifacts. Same recipe, same hostname/keys/packages — just
+a different output shape.
+
+### Runtime pieces (have to ship with the prep image)
+
+A/B is not just "write to the other partition." For the
+watchdog + revert to be self-contained:
+
+1. **`/boot/ab-state.txt`** — readable by initramfs (busybox sh).
+   Fields:
+   - `active: a` (slot booting right now)
+   - `pending: b` (slot waiting to be promoted)
+   - `last-good: a` (revert target)
+   - `failed-count: N` (watchdog tries before giving up)
+2. **Initramfs hook** that reads `ab-state.txt` + swaps the
+   `root=PARTUUID=...` on the kernel cmdline based on state.
+   Pi-bake adds this to the apkovl/image at bake time.
+3. **`pi-bake-ab-upgrade`** CLI tool on the Pi
+   (`/usr/local/bin/pi-bake-ab-upgrade /path/to/update.img.xz`):
+   verifies the image (sha256 + maybe operator signature),
+   writes to the inactive partition, sets `ab-state` to
+   `pending`, reboots. Idempotent + crash-safe (writes
+   ab-state last).
+4. **Watchdog service** — openrc sysinit-time service that
+   runs the sanity check from the recipe + flips ab-state from
+   `pending` to `active` on success. On timeout / failure:
+   increments `failed-count`, reverts to `last-good` slot,
+   reboots. After N failures the slot is "bad" and the system
+   alerts (rsyslog → operator's collector).
+5. **Persistent state via p4** — moving `/var/lib/<app>` and
+   ssh host keys onto p4's data partition (symlinks from the
+   sysroot) so an OTA doesn't lose them.
+
+### Why this entry doesn't ship right now
+
+Real engineering effort — ~1000 LOC across new backend module
+(4-partition layout extension to `alpine_ext4.py`), apkovl
+shipping the hook + tool + service, and integration tests that
+fake a watchdog revert. Not blocked on anything; just a
+self-contained chunk of work that hasn't been picked up.
+
+When picked up: implement against `os_mode: ext4` first (the
+sys-mode constraint above), then evaluate whether raspbian
+backend should grow A/B too (#9 is losetup-based; would need
+similar partition-table extension).
+
+**Pairs with [[direct-to-device-flash]]** in feature_request.md
+— once `output.path: /dev/sdX` lands, the OTA flow on the Pi
+is `pi-bake-ab-upgrade` writing directly to `/dev/mmcblk0p3`
+(or p2) with the same safety guards.
+
+---
+
+## 18. Secure boot (verified boot chain)
+**⏸ deferred — opt-in for stronger threat models**
+
+Extends #17's watchdog-revert story with cryptographic
+verification of each boot stage. Builds the trust chain
+operators with physical-tamper threat models actually need:
+
+> "An attacker who briefly has access to the SD card can NOT
+> swap the rootfs (or kernel, or initramfs) for one of their
+> own. Even if the apkovl is signed, attacker can flash a
+> different rootfs that ignores the apkovl entirely."
+
+#17's apkovl-init A/B doesn't defend against that. The kernel
++ initramfs on FAT are unsigned; replacing them replaces the
+entire trust chain.
+
+### Three paths, only one worth taking
+
+| Path | Slot-switch by | Crypto verifies | Trade-off |
+|---|---|---|---|
+| A: Pi firmware + apkovl-init (#17) | initramfs hook | EEPROM-level only (Pi 4+/CM4 SECURE_BOOT verifies boot.img) | Slot switching is rootfs-only; verified-boot ends at boot.img. Lowest complexity. |
+| **B: Pi firmware + U-Boot + kernel** | **U-Boot bootenv** | **EEPROM verifies U-Boot; U-Boot verifies FIT-signed kernel/initramfs/dtb** | **+1 component, +1-2 sec boot. The verified-boot story that actually works on Pi. This entry's recommendation.** |
+| C: Pi firmware + U-Boot + GRUB + kernel | GRUB | GRUB+shim signature chain | Only earns its keep if you share infra with an x86 fleet that uses GRUB. Skip on Pi-only labs. |
+
+### Path B implementation sketch
+
+- **Pi EEPROM secure boot:** operator fuses their RSA-4096
+  signing key into the OTP (one-time). Pi firmware only loads
+  a signed `boot.img` (kernel + initramfs + DTBs as a tarball).
+  Pi-bake produces a signed `boot.img` at bake time using a
+  `secure_boot.sign_with: ~/.keys/fleet-key.pem` recipe field.
+- **U-Boot (the actual boot logic):** pi-bake includes a
+  prebuilt U-Boot binary in the FAT (Pi firmware loads U-Boot
+  as the "kernel" via `kernel=u-boot.bin` in config.txt). U-Boot
+  reads `/uboot/boot.scr.uimg` (boot script — fit-verified by
+  U-Boot's compiled-in DTB pubkey), drives A/B via U-Boot's
+  `bootenv` + `bootcount` + `upgrade_available` (battle-tested
+  in Toradex / Variscite industrial Pi deployments), then loads
+  the FIT image for the chosen slot.
+- **FIT-signed kernel/initramfs/dtb per slot:** each slot's
+  rootfs ships with its own FIT image (`/boot/slot-A.itb`,
+  `/boot/slot-B.itb`). pi-bake signs both at bake time using a
+  fleet boot-signing key (same key, two FIT outputs).
+
+### Pi-bake's existing trust model — two key tiers
+
+The current per-bake APKINDEX key (per `design/security_notes.txt`'s
+description of #8) is great for compartmentalized apk-install
+trust but doesn't extend to boot-time naturally:
+
+- Pi EEPROM secure boot needs a STABLE operator key (OTP-fused;
+  can't rotate per-bake)
+- U-Boot FIT verified boot uses a key compiled into U-Boot's
+  DTB (same constraint — stable per fleet)
+
+So secure-boot operators run TWO keys:
+
+1. **Per-bake APKINDEX key** (existing #8) — short-lived,
+   signs the apk repo at bake time, dies with the bake process.
+2. **Long-lived fleet boot-signing key** (NEW for #18) —
+   signs boot.img (Pi EEPROM path) or FIT image (U-Boot path).
+   Stays in the operator's HSM / smart card / `~/.keys/`.
+   One key per Pi fleet, not per Pi.
+
+### Why deferred
+
+- Real engineering: building U-Boot, FIT image tooling,
+  bootenv management, signed-image-at-bake-time pipeline.
+  Probably 1500+ LOC + a new dependency (`u-boot-tools` on the
+  bake host).
+- Today's downstream projects (totaldns) have not asked for
+  this. The watchdog-revert motivation (#17) covers the
+  dominant failure mode; secure boot covers the secondary
+  "attacker with physical access" mode.
+- Pi Foundation EEPROM secure boot is still maturing — the
+  feature set in 2026 is more flexible than 2023's first
+  cut. Picking up U-Boot integration now might miss
+  future Pi-firmware-native features.
+
+When picked up:
+- Add `secure_boot:` recipe block (sign-with key path,
+  enforcement level, optionally `bootloader: u-boot`).
+- Build the U-Boot binary at bake time OR cache prebuilt
+  binaries per board/version like apk-tools-static.
+- Sign boot.img / FIT images via openssl, matching the
+  existing apkfetch.py signing pattern.
 
 ---
 
