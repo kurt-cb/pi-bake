@@ -5,6 +5,93 @@ tags via `./scripts/release-notes.sh`. To add notes for
 a new release, tag the commit with
 `git tag -a vX.Y.Z -m "..."` and re-run this script.
 
+## v0.3.3 — 2026-05-27
+
+ONE-LINE: pi-bake build --config <recipe>.yaml with `os_mode: pxe`
++ `packages:` now works on Alpine 3.22 / Python 3.12 bake hosts.
+
+REPORTED + REPRODUCED
+
+By the totaldns operator 2026-05-27 in the lab:
+- `pi-bake 0.3.2` (PyPI fresh venv) on the lab host
+- `pi-bake 0.3.2.dev1+gc49b583d8.d20260527` (Alpine 3.22 bake host)
+- Same recipe (PXE recovery image with avahi + dbus + sftp-server)
+  failed with "error: flush of closed file" right after
+  "bake-time apk-fetch: 4 package(s)"
+- Same recipe with `packages:` removed succeeded.
+
+The bug did NOT reproduce on the development laptop (Fedora 44 /
+Python 3.14), which masked it from local testing. Repro'd on the
+Alpine 3.22 bake host once the operator filed the bug report.
+
+ROOT CAUSE
+
+`apkfetch.extract_initramfs_keys` manually closed `p.stdin` before
+calling `p.communicate()`:
+
+```python
+with gzip.open(initramfs, "rb") as gz:
+    p = subprocess.Popen(["cpio", ...], stdin=PIPE, stderr=PIPE)
+    shutil.copyfileobj(gz, p.stdin)
+    p.stdin.close()                    # <- the bug
+    _, err = p.communicate()           # <- raises on 3.12, no-op on 3.14
+```
+
+CPython 3.12's `Popen._communicate` always calls `self.stdin.flush()`
+as its first step. On an already-closed BufferedWriter that raises
+`ValueError("flush of closed file")`. CPython 3.14 short-circuits
+the flush on a closed handle, hiding the bug.
+
+FIX
+
+Drop the manual `p.stdin.close()`. `communicate()` flushes and
+closes stdin itself, which is what signals EOF to cpio. Behavior
+unchanged on the diskless / ext4 backends — neither hit this code
+path.
+
+REGRESSION TEST
+
+`test_extract_initramfs_keys_no_premature_stdin_close` uses
+`ast.walk` over the function body to detect any `<x>.stdin.close()`
+call. Catches the bug pattern without needing a real initramfs at
+test time — works on any Python version, any host. 172 passing.
+
+VALIDATION ON THE BAKE HOST
+
+After force-reinstalling the fixed wheel on the operator's bake
+host (Alpine 3.22 / Python 3.12), the previously-failing recipe
+bakes cleanly:
+
+  pi-bake build --config td-pi-recovery.yaml
+  INFO  pi_bake.alpine_pxe — bake-time apk-fetch: 4 package(s)
+  INFO  pi_bake.apkfetch — apk fetch: 118 apk file(s) → apks/aarch64
+  INFO  pi_bake.apkfetch — APKINDEX signing key: pi-bake-XXXXXXXX.rsa.pub
+  INFO  pi_bake.apkfetch — APKINDEX signed: 14508 bytes
+  INFO  pi_bake.alpine_pxe — DONE: /tmp/td-pi-recovery
+  wrote /tmp/td-pi-recovery/ (91 MB across 511 files)
+
+DOCS ALSO IN THIS RELEASE
+
+- CHANGELOG.md auto-generated from annotated git tag messages by
+  scripts/release-notes.sh. Re-run after future tags.
+- README.md: documented `iflag=fullblock` on the remote dd as the
+  canonical SSH-streamed flash pattern. Without it, BusyBox dd
+  short-reads SSH-delivered TCP-sized chunks and writes 32 KB at a
+  time instead of bs=4M, making the flash 100x slower. Confirmed
+  on the bake host hands-on.
+- feature_request.md: two new entries informed by the hardware
+  bring-up loop:
+  - "Direct-to-device flash + safety guards" — accept `/dev/sdX`
+    as `output.path` so the operator's workflow can be one command
+    instead of `xzcat … | sudo dd …`. With FS-detection refusal +
+    mount-check + size-sanity + removable-only-by-default +
+    interactive confirm.
+  - "A/B slot boot + atomic upgrade" — concrete shape for
+    mynotes.txt's two-OS-boot-with-watchdog idea, now that ext4
+    sys-mode is shipping. Four-partition layout (FAT /boot + ext4
+    root-A + ext4 root-B + ext4 data), per-slot apkovl, watchdog
+    revert on failed sanity-check.
+
 ## v0.3.2 — 2026-05-27
 
 ## v0.3.1 — 2026-05-27
