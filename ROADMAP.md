@@ -24,6 +24,8 @@ versions get assigned at tag time, not here.
 | 16 |  ⬜   | [Operator-controlled FAT contents (extended backups, scratch)](#16-operator-controlled-fat-contents) |
 | 17 |  ⬜   | [A/B rootfs with watchdog auto-revert](#17-ab-rootfs-with-watchdog-auto-revert) |
 | 18 |  ⏸   | [Secure boot (verified boot chain — opt-in for stronger threat models)](#18-secure-boot) |
+| 19 |  ✅   | [Alpine ext4 (sys-mode) backend (`os_mode: ext4`)](#19-alpine-ext4-sys-mode-backend) |
+| 20 |  ✅   | [Alpine PXE backend (`os_mode: pxe`)](#20-alpine-pxe-backend) |
 
 **State key:** ✅ shipped · 🟡 partial (code in, hardware verification or extra step pending) · 🚧 in flight · 🔴 blocked (on another item) · ⬜ not started · ⏸ deferred (won't pick up without more signal) · ❌ dead-ended (deliberately abandoned)
 
@@ -691,6 +693,124 @@ When picked up:
   binaries per board/version like apk-tools-static.
 - Sign boot.img / FIT images via openssl, matching the
   existing apkfetch.py signing pattern.
+
+---
+
+## 19. Alpine ext4 (sys-mode) backend
+**✅ shipped — `os_mode: ext4`**
+
+Companion to the original Alpine diskless backend. Produces a
+partitioned `.img.xz` (FAT `/boot` + ext4 `/`) instead of the
+v0.0+ apkovl + modloop-on-FAT shape. Same recipe schema; new
+`os_mode: ext4` field on the Recipe + bake.py dispatcher. Requires
+SUDO (losetup + mkfs), joining the sudo'd backends (#9 / #10 / #11).
+
+Cross-arch bootstrap via apk-tools-static with `--no-scripts` —
+deferred post-install hooks fire on first boot via the
+`/etc/init.d/pi-bake-firstboot-fix` one-shot openrc service
+that runs `apk fix --no-network`. Busybox's `--install -s` hook
+that creates `/sbin/init` (and ~300 other applet symlinks)
+can't run cross-arch from the bake host, so pi-bake replicates
+it at bake time by reading `/etc/busybox-paths.d/busybox` and
+creating each symlink itself (would otherwise kernel-panic on
+SD boot — caught + fixed during 2026-05-27 hardware bring-up).
+
+The ONLY backend that supports `os_version: edge` — diskless
++ edge raises at recipe-load because Alpine ships no RPi edge
+tarball and modloop-on-FAT makes post-boot kernel upgrade an
+awkward ritual we won't paper over. ext4's `apk upgrade
+linux-rpi` works normally.
+
+Bake-host extras vs. diskless:
+- losetup, mount, sfdisk, mkfs.vfat, mkfs.ext4 (joining the
+  sudo'd backend set)
+- otherwise reuses apkfetch.py + imgxz.py from existing
+  backends
+
+Container-friendly extensions to imgxz.py landed with this
+backend so the LXC/Incus bake-host workflow works:
+- `_sudo()` skips the `sudo` prefix when euid==0 (no sudo
+  package needed in containers SSH'd into as root)
+- per-partition offset-based loop attach (sidesteps incus
+  cgroup-BPF blocking major 259 for partition device nodes
+  while allowing major 7 for loop devices — every device
+  pi-bake touches is now major 7)
+- stderr surfaced in RuntimeError on _sudo failure (was
+  swallowed in CalledProcessError → opaque "rc=1" errors)
+- root-aware write_file / append_file (open directly when
+  root; pipe through `sudo tee` only when not)
+
+Validated end-to-end on a CM4 2026-05-27: SD boot reaches
+login, networking comes up, sshd accepts connections,
+hostname matches recipe.
+
+Outputs `.img.xz` (not `.img.gz` like diskless mode).
+
+See `src/pi_bake/alpine_ext4.py`, `examples/pi-5-alpine-ext4.yaml`.
+
+---
+
+## 20. Alpine PXE backend
+**✅ shipped — `os_mode: pxe`**
+
+The "lab recovery" backend. Output is a per-host directory
+(NOT a flashable image) the operator drops into their lab's
+TFTP root at `/var/lib/tftpboot/<cm4-mac>/`. The same tree gets
+served over HTTP via the lab nginx (see `ngnix_setup.md`). Pi
+PXE-boots the kernel + initramfs via TFTP, then the
+initramfs's init script wget-fetches `apkovl=URL` +
+`alpine_repo=URL` over HTTP — no SD card, no NFS, no NBD,
+no rebuilt initramfs.
+
+`linux-rpi`'s `CONFIG_BCMGENET=y` is built-in, so the stock
+Alpine RPi initramfs already supports pure-network boot
+without rebuild. No qemu-user-static; no module rebuilds; no
+chroot.
+
+Recipe gains a `pxe.server_url:` field — the lab HTTP base
+URL that becomes the prefix for `apkovl=URL` +
+`alpine_repo=URL` in cmdline.txt. Required when
+`os_mode: pxe`.
+
+Recipe-level gotchas baked into the backend (so future
+operators don't relearn them):
+
+1. `alpine_repo` URL must NOT end with the arch suffix — apk
+   appends `/<arch>/APKINDEX.tar.gz` itself. The backend
+   writes `<server>/apks` and lets apk do the rest.
+2. apkovl gets an `auto eth0 inet dhcp` block in
+   `/etc/network/interfaces` (via the
+   `explicit_eth0_dhcp=True` kwarg the pxe backend passes to
+   `alpine._write_apkovl`). Default diskless apkovl writes
+   `lo` only and relies on dhcpcd-as-daemon; in pure-PXE
+   timing dhcpcd alone doesn't bring up eth0 reliably.
+3. After tarball extraction, pi-bake chmods the output tree
+   to world-readable (`a+r` files, `a+rX` dirs). The Alpine
+   RPi tarball ships some files at mode 0o600 (notably
+   `boot/initramfs-rpi`) and Python's `data` extraction
+   filter preserves that. dnsmasq-tftp + nginx both run as
+   non-operator users on the lab host and can't read
+   600-mode files → TFTP "failed sending" + HTTP 403 →
+   kernel panic with no initramfs.
+
+Companion lab-side doc: `ngnix_setup.md` covers the nginx +
+firewalld + SELinux setup the operator needs on the lab host.
+
+Validated end-to-end on a CM4 2026-05-27: PXE boot fetches
+kernel + initramfs via TFTP, initramfs DHCPs + wgets apkovl,
+apk install pulls 118 .apks via HTTP including signed
+APKINDEX, switch_root + openrc starts networking + sshd +
+dhcpcd + chronyd, system reachable as hostname `smoke-pxe`.
+
+A "flush of closed file" bug in the apkfetch path
+(Python 3.12 specific — manual `p.stdin.close()` before
+`p.communicate()` raises on 3.12 but no-ops on 3.14) was
+caught by the totaldns operator's first real-use bake +
+fixed with a regression test that uses `ast.walk` to detect
+the bug pattern.
+
+See `src/pi_bake/alpine_pxe.py`, `examples/pi-cm4-alpine-pxe.yaml`,
+`ngnix_setup.md`.
 
 ---
 
