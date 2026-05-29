@@ -82,6 +82,19 @@ def test_firstrun_sh_enables_ssh_service():
     assert "systemctl enable ssh.service" in s
 
 
+def test_firstrun_sh_masks_host_key_regenerator():
+    """Pi OS's regenerate_ssh_host_keys.service runs once at first
+    boot and `rm -f /etc/ssh/ssh_host_*` + ssh-keygen -A's. That
+    blows away any pre-baked host key (the whole point of
+    ssh_host_key:). raspbian.py masks the unit at bake time via
+    an empty unit file; firstrun.sh masks again as belt-and-
+    suspenders in case a future Pi OS adds a different regen
+    path. Latent bug since v0.2 — exposed by `ssh_host_key:
+    usehost` making the expected fingerprint predictable."""
+    s = _firstrun_sh(_node(), "$6$abc$hash")
+    assert "systemctl mask regenerate_ssh_host_keys.service" in s
+
+
 def test_firstrun_sh_self_deletes_and_strips_cmdline():
     """After the work is done, the script removes itself and
     strips both systemd.run= and systemd.unit= directives from

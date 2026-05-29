@@ -157,6 +157,12 @@ def _firstrun_sh(node: NodeConfig, pi_hash: str) -> str:
         "# default on Pi OS Lite.\n"
         "systemctl enable ssh.service 2>/dev/null || true\n"
         "\n"
+        "# Belt-and-suspenders: mask Pi OS's host-key regenerator\n"
+        "# in case the bake-time mask (empty unit file) didn't take.\n"
+        "# Without this, /etc/ssh/ssh_host_* gets clobbered on the\n"
+        "# next boot and the operator-known fingerprint stops matching.\n"
+        "systemctl mask regenerate_ssh_host_keys.service 2>/dev/null || true\n"
+        "\n"
         "# Disarm legacy first-boot markers so userconf-pi.service\n"
         "# doesn't fight us on the post-reboot multi-user.target.\n"
         "rm -f /boot/firmware/userconf.txt /boot/firmware/ssh"
@@ -362,7 +368,26 @@ def _write_root_partition(root: Path, node: NodeConfig) -> None:
             root, f"etc/ssh/ssh_host_{ktype}_key.pub",
             node.ssh_host_key_pub, mode=0o644,
         )
-        LOG.info("root: pre-baked ssh_host_%s_key", ktype)
+        # Mask Pi OS's regenerate_ssh_host_keys.service so it
+        # doesn't `rm -f /etc/ssh/ssh_host_*` on first boot and
+        # generate fresh random keys — which would defeat the
+        # whole point of pre-baking a stable identity. systemd
+        # treats an empty unit file in /etc/systemd/system as
+        # masked (equivalent to `systemctl mask`). Latent bug
+        # since v0.2 — got noticed once `ssh_host_key: usehost`
+        # made the expected fingerprint predictable. The Pi OS
+        # init's regen script lives at
+        # /usr/lib/raspberrypi-sys-mods/regenerate_ssh_host_keys
+        # and runs from the same-named .service unit.
+        imgxz.write_file(
+            root,
+            "etc/systemd/system/regenerate_ssh_host_keys.service",
+            b"", mode=0o644,
+        )
+        LOG.info(
+            "root: pre-baked ssh_host_%s_key + masked "
+            "regenerate_ssh_host_keys.service", ktype,
+        )
 
     # Static IP via dhcpcd (Pi OS default network manager — same
     # as Alpine). Append an interface block to /etc/dhcpcd.conf.
