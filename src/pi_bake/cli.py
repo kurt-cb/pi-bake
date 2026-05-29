@@ -1,13 +1,15 @@
 """pi-bake CLI.
 
 Subcommands:
-  list-boards         — every supported Pi model
-  list-os [--board B] — every OS we can bake (optionally filtered)
-  build               — bake an .img.gz for one Pi (CLI flags or --config YAML)
+  list-boards                    — every supported Pi model
+  list-os [--board B]            — every OS we can bake (optionally filtered)
+  list-os-versions [--os NAME]   — every selectable os_version per OS
+  build                          — bake an .img.gz for one Pi (CLI flags or --config YAML)
 
 Examples:
   pi-bake list-boards
   pi-bake list-os --board pi-zero-2-w
+  pi-bake list-os-versions --os raspbian
 
   # Flag-driven bake (familiar form).
   pi-bake build \\
@@ -39,7 +41,9 @@ from pi_bake import __version__
 from pi_bake.bake import build, supports
 from pi_bake.boards import BOARDS, list_boards
 from pi_bake.config import NodeConfig
-from pi_bake.oses import list_oses
+from pi_bake.oses import (
+    RASPBIAN_BUILDS, DEBIAN_BUILDS, get_os, list_oses,
+)
 from pi_bake.recipe import (
     NetworkSpec, OutputSpec, Recipe, WifiSpec,
     dump_recipe, load_recipe, recipe_to_node_config,
@@ -89,6 +93,57 @@ def _cmd_list_boards(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_list_os_versions(args: argparse.Namespace) -> int:
+    """Per-OS table of every selectable os_version: value.
+
+    Shows the two sentinels (`latest` -> upstream-current, `stable`
+    -> pi-bake's curated known-good) plus every concrete version
+    in the catalog. For Raspbian / Debian the codename derived
+    from the catalog is included so the operator knows what
+    they're picking.
+    """
+    if args.os:
+        try:
+            oses = [get_os(args.os)]
+        except KeyError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 2
+    else:
+        oses = list_oses()
+    for o in oses:
+        print(f"=== {o.name} ({o.pretty})")
+        rows: list[dict] = []
+        # Sentinels first
+        rows.append({
+            "version": "latest",
+            "resolves_to": o.latest() if o.name != "raspbian"
+                          else "(upstream permanent-redirect)",
+            "notes": "current upstream — may regress",
+        })
+        rows.append({
+            "version": "stable",
+            "resolves_to": o.stable(),
+            "notes": "pi-bake curated known-good",
+        })
+        for v in o.versions:
+            if v == "latest":
+                continue  # already shown as sentinel
+            note = ""
+            if o.name == "raspbian" and v in RASPBIAN_BUILDS:
+                codename, _ = RASPBIAN_BUILDS[v]
+                note = codename
+            elif o.name == "debian" and v in DEBIAN_BUILDS:
+                note = DEBIAN_BUILDS[v]
+            rows.append({
+                "version": v,
+                "resolves_to": v,
+                "notes": note,
+            })
+        _print_table(rows, ["version", "resolves_to", "notes"])
+        print()
+    return 0
+
+
 def _cmd_list_os(args: argparse.Namespace) -> int:
     oses = list_oses(board=args.board)
     rows = [
@@ -96,18 +151,22 @@ def _cmd_list_os(args: argparse.Namespace) -> int:
             "os": o.name,
             "pretty": o.pretty,
             "latest": o.latest(),
+            "stable": o.stable(),
             "all_versions": ", ".join(o.versions),
             "backend": o.bake_backend,
             "boards": ", ".join(sorted(o.supports_boards)),
         }
         for o in oses
     ]
-    _print_table(rows, ["os", "pretty", "latest", "backend", "boards"])
+    _print_table(rows, ["os", "pretty", "latest", "stable", "backend", "boards"])
     print()
     for r in rows:
         os_obj = next(o for o in oses if o.name == r["os"])
         if os_obj.notes:
             print(f"  {r['os']}: {os_obj.notes}")
+    print()
+    print("Run `pi-bake list-os-versions [--os NAME]` for every selectable "
+          "os_version per OS.")
     return 0
 
 
@@ -278,6 +337,19 @@ def _build_parser() -> argparse.ArgumentParser:
         "--board", help="filter to OSes supported on this board",
     )
     p_los.set_defaults(func=_cmd_list_os)
+
+    # list-os-versions
+    p_lov = sub.add_parser(
+        "list-os-versions",
+        help="every selectable os_version per OS "
+             "(sentinels + dated builds)",
+    )
+    p_lov.add_argument(
+        "--os", dest="os",
+        help="restrict to one OS (alpine | raspbian | debian | fedora). "
+             "Default: all four.",
+    )
+    p_lov.set_defaults(func=_cmd_list_os_versions)
 
     # build
     p_b = sub.add_parser(

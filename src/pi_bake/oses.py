@@ -24,14 +24,30 @@ class OSImage:
     name: str                    # short slug, e.g. "alpine"
     pretty: str                  # "Alpine Linux"
     bake_backend: str            # "alpine" | "raspbian"  (module under pi_bake/)
-    versions: tuple[str, ...]    # known-good versions (newest first)
+    versions: tuple[str, ...]    # selectable versions (newest first)
     url_template: str            # URL with {version} + {arch} placeholders
     image_kind: str              # "tarball" (Alpine) | "img_xz" (Raspbian)
     supports_boards: frozenset[str] = field(default_factory=frozenset)
     notes: str = ""
+    # Two sentinels can appear as `os_version:` in a recipe:
+    #   `latest` -> the URL builder picks the bleeding-edge upstream.
+    #     For Raspbian this is the permanent-redirect endpoint
+    #     (truly bleeding edge — moves whenever upstream cuts a
+    #     build); for OSes without an upstream "latest" alias this
+    #     resolves to versions[0] (the newest catalog entry, which
+    #     we bump by hand on each pi-bake release).
+    #   `stable` -> pi-bake's curated known-good pick. May lag
+    #     `latest` deliberately to dodge upstream regressions. The
+    #     `stable_version` field below is the concrete answer; the
+    #     resolver interpolates it through the URL template.
+    # Empty `stable_version` falls back to versions[0].
+    stable_version: str = ""
 
     def latest(self) -> str:
         return self.versions[0]
+
+    def stable(self) -> str:
+        return self.stable_version or self.versions[0]
 
     def __str__(self) -> str:
         return f"{self.name} {self.versions[0]} — {self.pretty}"
@@ -52,6 +68,10 @@ ALPINE = OSImage(
     # and modloop-on-FAT makes post-boot kernel upgrade a manual
     # ritual we won't paper over.
     versions=("3.21.4", "3.21.3", "3.20.5", "3.19.7", "edge"),
+    # `stable`: 3.21.4 is hardware-validated on Pi 5 / CM4 with both
+    # diskless and ext4 modes. Bump after a new point release ships
+    # and clears smoke-bake.
+    stable_version="3.21.4",
     url_template=(
         "https://dl-cdn.alpinelinux.org/alpine/"
         "v{minor_version}/releases/{arch}/"
@@ -77,14 +97,51 @@ ALPINE = OSImage(
 #   https://downloads.raspberrypi.com/raspios_lite_arm64/images/
 # The `_latest` endpoint is a permanent redirect to the current
 # build (e.g. 2026-04-21-raspios-trixie-arm64-lite.img.xz).
+#
+# RASPBIAN_BUILDS catalogs the dated archives. Key = directory
+# date (also what the operator types as os_version). Value =
+# (codename, file_date) — codename for the filename, file_date
+# for the cases where the .img.xz inside the dated directory is
+# stamped one day earlier than the directory itself (a Pi-OS
+# release-pipeline quirk; e.g. directory 2025-10-02 contains a
+# 2025-10-01-built image). Without storing both, the URL builder
+# would 404. Bump this dict when a new build lands upstream —
+# `pi-bake list-os-versions --os raspbian` displays the menu.
+RASPBIAN_BUILDS: dict[str, tuple[str, str]] = {
+    # directory-date     -> (codename, file-date-in-filename)
+    "2026-04-21": ("trixie", "2026-04-21"),
+    "2026-04-14": ("trixie", "2026-04-13"),
+    "2025-12-04": ("trixie", "2025-12-04"),
+    "2025-11-24": ("trixie", "2025-11-24"),
+    "2025-10-02": ("trixie", "2025-10-01"),  # first trixie release
+    "2025-05-13": ("bookworm", "2025-05-13"),  # last bookworm
+    "2024-11-19": ("bookworm", "2024-11-19"),
+    "2024-07-04": ("bookworm", "2024-07-04"),
+    "2024-03-15": ("bookworm", "2024-03-15"),
+    "2023-12-11": ("bookworm", "2023-12-11"),
+    "2023-12-06": ("bookworm", "2023-12-05"),
+}
+
+# versions tuple holds `latest` (permanent-redirect) first, then
+# every dated build in newest-first order. `latest()` returns the
+# tuple's first element, so the permanent-redirect remains the
+# default when os_version is unset.
+_RASPBIAN_DATES_NEWEST_FIRST = tuple(
+    sorted(RASPBIAN_BUILDS.keys(), reverse=True)
+)
+
 RASPBIAN = OSImage(
     name="raspbian",
     pretty="Raspberry Pi OS Lite",
     bake_backend="raspbian",
-    # "latest" means "follow the permanent redirect" — pi-bake's
-    # download.fetch() handles 30x. Operator pins via the `_YYYY`
-    # versions when bumping.
-    versions=("latest",),
+    versions=("latest",) + _RASPBIAN_DATES_NEWEST_FIRST,
+    # `stable`: 2025-05-13 is the last Bookworm build before Pi OS
+    # moved to Trixie. Trixie's userconf-pi service creates the pi
+    # user with /usr/sbin/nologin by default, which breaks pi-bake's
+    # SSH-key-only login flow. Bookworm's userconf-pi sets /bin/bash
+    # and works out of the box. Bump after a future Trixie release
+    # fixes this or pi-bake gains its own firstrun.sh.
+    stable_version="2025-05-13",
     url_template=(
         "https://downloads.raspberrypi.com/raspios_lite_{arch}_latest"
     ),
@@ -92,12 +149,39 @@ RASPBIAN = OSImage(
     supports_boards=frozenset({"pi-3", "pi-4", "pi-5"}),
     notes=(
         "Recommended for Pi 4 / Pi 5. arch=arm64 in the URL maps to "
-        "Board.arch=aarch64. The `latest` version follows Raspberry "
-        "Pi's permanent redirect to the current dated build (likely "
-        "trixie as of 2026). 32-bit raspbian for Pi Zero W is a "
-        "separate URL — added when needed."
+        "Board.arch=aarch64. `latest` follows Raspberry Pi's "
+        "permanent redirect to the current dated build (currently "
+        "Trixie — see stable note). `stable` -> 2025-05-13 "
+        "(last Bookworm, sidesteps Trixie's userconf-pi nologin "
+        "default). Pin to a specific date (e.g. os_version: "
+        "2025-05-13) to lock. Run `pi-bake list-os-versions --os "
+        "raspbian` for the menu. 32-bit raspbian for Pi Zero W is "
+        "a separate URL — added when needed."
     ),
 )
+
+
+def raspbian_url(version: str, arch: str) -> str:
+    """Build the upstream URL for a Raspbian version + arch.
+
+    `version="latest"` returns the permanent-redirect endpoint;
+    every other value must be a key in RASPBIAN_BUILDS (a dated
+    directory). Raises KeyError on unknown date strings — the CLI
+    surfaces this as "Run `pi-bake list-os-versions --os raspbian`".
+    """
+    if version == "latest":
+        return f"https://downloads.raspberrypi.com/raspios_lite_{arch}_latest"
+    if version not in RASPBIAN_BUILDS:
+        raise KeyError(
+            f"unknown raspbian version {version!r}; "
+            f"known: latest, {', '.join(_RASPBIAN_DATES_NEWEST_FIRST)}"
+        )
+    codename, file_date = RASPBIAN_BUILDS[version]
+    return (
+        f"https://downloads.raspberrypi.com/raspios_lite_{arch}/images/"
+        f"raspios_lite_{arch}-{version}/"
+        f"{file_date}-raspios-{codename}-{arch}-lite.img.xz"
+    )
 
 # Plain Debian (community Pi 4/5 images).
 # Less polish than Raspberry Pi OS but useful for users who don't
@@ -107,14 +191,31 @@ RASPBIAN = OSImage(
 # is `YYYYMMDD_raspi_<N>_<codename>.img.xz`. The version field below
 # is the date string; bumped manually until #14 (dynamic version
 # discovery) lands.
+# Debian (raspi.debian.net) tested builds. Both the date AND
+# the codename are encoded in the upstream filename (e.g.
+# `20231109_raspi_4_bookworm.img.xz`), so each catalog entry
+# carries its codename here. Earlier Bullseye builds remain
+# downloadable but pi-bake skips them — there's no benefit over
+# Bookworm for new bakes.
+DEBIAN_BUILDS: dict[str, str] = {
+    # date     -> codename (the all-models build; trixie has Pi 4 only)
+    "20231111": "trixie",     # Pi 4 only (no raspi_1/2/3/5 builds)
+    "20231109": "bookworm",   # full Pi 1/2/3/4 set
+}
+_DEBIAN_DATES_NEWEST_FIRST = tuple(
+    sorted(DEBIAN_BUILDS.keys(), reverse=True)
+)
+
 DEBIAN = OSImage(
     name="debian",
     pretty="Debian",
     bake_backend="debian",
-    # raspi.debian.net's tested-image release cadence is slow;
-    # 2023-11-09 was the most recent "all 4 Pi models on bookworm"
-    # build as of 2026-05. Bump when a newer one lands.
-    versions=("20231109",),
+    versions=_DEBIAN_DATES_NEWEST_FIRST,
+    # `stable`: 20231109 is the last "all 4 Pi models on bookworm"
+    # build. The 20231111 trixie build is Pi-4-only and untested
+    # by pi-bake. Bump when raspi.debian.net publishes a newer
+    # tested set.
+    stable_version="20231109",
     url_template=(
         "https://raspi.debian.net/tested/"
         "{version}_raspi_{rpi_n}_bookworm.img.xz"
@@ -130,9 +231,29 @@ DEBIAN = OSImage(
         "firmware shim). Version field is the YYYYMMDD build date. "
         "Pi 5 is NOT in the catalog yet — raspi.debian.net doesn't "
         "publish a Pi 5 tested build (2026-05). Use Raspbian or "
-        "Alpine for Pi 5."
+        "Alpine for Pi 5. Run `pi-bake list-os-versions --os debian` "
+        "for the menu."
     ),
 )
+
+
+def debian_url(version: str, rpi_n: str) -> str:
+    """Build the raspi.debian.net tested-build URL.
+
+    `version` is a YYYYMMDD date string in DEBIAN_BUILDS. Codename
+    is looked up from the catalog (the upstream filename embeds
+    it). Raises KeyError on unknown dates.
+    """
+    if version not in DEBIAN_BUILDS:
+        raise KeyError(
+            f"unknown debian version {version!r}; "
+            f"known: {', '.join(_DEBIAN_DATES_NEWEST_FIRST)}"
+        )
+    codename = DEBIAN_BUILDS[version]
+    return (
+        f"https://raspi.debian.net/tested/"
+        f"{version}_raspi_{rpi_n}_{codename}.img.xz"
+    )
 
 # Fedora ARM (Cloud-Base aarch64). Generic ARM image — does NOT
 # ship Pi-specific firmware out of the box. pi-bake's Fedora
@@ -147,8 +268,14 @@ FEDORA = OSImage(
     bake_backend="fedora",
     # Fedora 43 is current as of 2026-05. The Server Host-Generic
     # aarch64 image is the right generic ARM target (no AmazonEC2
-    # specifics). Bump as Fedora releases happen (~6 month cadence).
-    versions=("43-1.6",),
+    # specifics). Each catalog entry is `<release>-<respin>`; the
+    # resolver derives `{minor_version}` (the release) from the
+    # leading number. Bump on each Fedora release (~6mo cadence).
+    versions=("43-1.6", "42-1.1"),
+    # `stable`: 43-1.6 is current Fedora Server. No known userconf-
+    # equivalent regression — Fedora's cloud-init NoCloud flow is
+    # stable across releases.
+    stable_version="43-1.6",
     url_template=(
         "https://download.fedoraproject.org/pub/fedora/linux/"
         "releases/{minor_version}/Server/{arch}/images/"
@@ -161,7 +288,8 @@ FEDORA = OSImage(
         "preset by pi-bake. NOT directly Pi-bootable — operator "
         "must run arm-image-installer --target=rpi4|rpi5 to inject "
         "Pi firmware. Pi-bootloader-shim is a future pi-bake "
-        "enhancement (see fedora.py docstring + ROADMAP)."
+        "enhancement (see fedora.py docstring + ROADMAP). Run "
+        "`pi-bake list-os-versions --os fedora` for the menu."
     ),
 )
 
@@ -195,14 +323,25 @@ def resolve_image(
     """Pick OSImage + version + computed URL for a (os, version,
     arch) request.
 
-    `version=None` means "use the latest known-good for this OS".
+    `version=None` (or empty string) means "use latest known-good for
+    this OS" -> versions[0]. `version="stable"` resolves to the
+    OS's curated stable_version (or versions[0] if unset).
     `board_slug` (e.g. "pi-5") is used by URL templates that
     encode the Pi model in the filename (Debian's raspi.debian.net
     convention). Default empty for back-compat — Alpine ignores it.
     Returns `(OSImage, resolved_version, url)`.
     """
     os_ = get_os(os_name)
-    if version is None:
+    if version is None or version == "":
+        version = os_.latest()
+    if version == "stable":
+        version = os_.stable()
+    # `latest` is special only for Raspbian — Pi OS publishes a
+    # permanent-redirect endpoint that downloads.fetch() follows
+    # via 30x. Every other backend has no upstream "latest" alias,
+    # so the sentinel resolves to the catalog's newest entry
+    # (which pi-bake's maintainers bump on each release).
+    if version == "latest" and os_.bake_backend != "raspbian":
         version = os_.latest()
     if version not in os_.versions:
         # Allow operator to force a version not in the catalog — they
@@ -260,11 +399,19 @@ def resolve_image(
     elif os_.bake_backend == "debian":
         # No board_slug passed (old caller) — default to Pi 5.
         rpi_n = "5"
-    url = os_.url_template.format(
-        version=download_version,
-        minor_version=minor,
-        arch=url_arch,
-        board="?",   # only used by old templates; ignored otherwise
-        rpi_n=rpi_n,
-    )
+    # Backend-specific URL dispatch for dated catalogs.
+    # Raspbian: `latest` -> permanent-redirect URL (template); any
+    # other version -> raspbian_url() builds the dated path.
+    if os_.bake_backend == "raspbian" and download_version != "latest":
+        url = raspbian_url(download_version, url_arch)
+    elif os_.bake_backend == "debian":
+        url = debian_url(download_version, rpi_n)
+    else:
+        url = os_.url_template.format(
+            version=download_version,
+            minor_version=minor,
+            arch=url_arch,
+            board="?",   # only used by old templates; ignored otherwise
+            rpi_n=rpi_n,
+        )
     return os_, version, url

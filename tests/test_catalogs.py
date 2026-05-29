@@ -5,7 +5,10 @@ import pytest
 
 from pi_bake.bake import supports
 from pi_bake.boards import BOARDS, get_board, list_boards
-from pi_bake.oses import OSES, get_os, list_oses, resolve_image
+from pi_bake.oses import (
+    DEBIAN_BUILDS, OSES, RASPBIAN_BUILDS,
+    debian_url, get_os, list_oses, raspbian_url, resolve_image,
+)
 
 
 def test_every_board_has_some_os_support():
@@ -144,3 +147,110 @@ def test_alpine_edge_present_in_catalog():
     # release — `edge` is never the default.
     assert alpine.latest() != "edge"
     assert "." in alpine.latest()
+
+
+# ----- `stable` sentinel + dated catalog support (v0.4) -----
+
+
+def test_every_os_has_a_stable_version():
+    """`stable` is the recommended on-ramp for new bakes — every
+    OS in the catalog must resolve `stable` to a concrete version."""
+    for o in OSES:
+        assert o.stable(), f"{o.name} has no stable version"
+        # stable_version (when explicit) or versions[0] (fallback) —
+        # either way must be a real entry in the catalog.
+        assert o.stable() in o.versions
+
+
+def test_stable_sentinel_resolves_per_os():
+    """`stable` -> the OS's curated known-good version."""
+    _, v, _ = resolve_image("raspbian", "stable", "aarch64", "pi-5")
+    assert v == "2025-05-13"
+    _, v, _ = resolve_image("alpine", "stable", "aarch64")
+    assert v == "3.21.4"
+    _, v, _ = resolve_image("debian", "stable", "aarch64", "pi-4")
+    assert v == "20231109"
+    _, v, _ = resolve_image("fedora", "stable", "aarch64")
+    assert v == "43-1.6"
+
+
+def test_raspbian_latest_uses_permanent_redirect():
+    """For Raspbian, `latest` is THE sentinel that follows Pi OS's
+    permanent-redirect endpoint (the rest is interpolation)."""
+    _, v, url = resolve_image("raspbian", "latest", "aarch64", "pi-5")
+    assert v == "latest"
+    assert url == (
+        "https://downloads.raspberrypi.com/raspios_lite_arm64_latest"
+    )
+
+
+def test_non_raspbian_latest_resolves_to_catalog_newest():
+    """Alpine / Debian / Fedora have no upstream `latest` alias —
+    the sentinel falls back to versions[0]."""
+    _, v, _ = resolve_image("alpine", "latest", "aarch64")
+    assert v == "3.21.4"
+    _, v, _ = resolve_image("debian", "latest", "aarch64", "pi-4")
+    assert v == "20231111"
+    _, v, _ = resolve_image("fedora", "latest", "aarch64")
+    assert v == "43-1.6"
+
+
+def test_raspbian_dated_url_includes_codename():
+    """Each Raspbian dated build has a codename (trixie/bookworm)
+    that gets baked into the filename — operator picks the date,
+    raspbian_url() looks up the codename."""
+    url = raspbian_url("2025-05-13", "arm64")
+    assert "raspios_lite_arm64-2025-05-13" in url
+    assert "2025-05-13-raspios-bookworm-arm64-lite.img.xz" in url
+    url = raspbian_url("2026-04-21", "arm64")
+    assert "2026-04-21-raspios-trixie-arm64-lite.img.xz" in url
+
+
+def test_raspbian_dated_url_handles_off_by_one_file_date():
+    """Some Pi OS directory dates differ from the file's build
+    date by one day (release-pipeline quirk). The catalog encodes
+    both so the URL hits a real file."""
+    # 2025-10-02 directory contains 2025-10-01-built file.
+    url = raspbian_url("2025-10-02", "arm64")
+    assert "raspios_lite_arm64-2025-10-02/" in url   # directory
+    assert "2025-10-01-raspios-trixie" in url        # file date
+
+
+def test_raspbian_unknown_version_raises_with_menu():
+    """Operator-friendly error: lists known versions."""
+    with pytest.raises(KeyError, match="unknown raspbian version"):
+        raspbian_url("9999-99-99", "arm64")
+
+
+def test_debian_dated_url_includes_codename():
+    """Debian's tested-build filename embeds the codename;
+    debian_url() looks it up from DEBIAN_BUILDS."""
+    url = debian_url("20231109", "4")
+    assert "20231109_raspi_4_bookworm.img.xz" in url
+    url = debian_url("20231111", "4")
+    assert "20231111_raspi_4_trixie.img.xz" in url
+
+
+def test_debian_unknown_version_raises():
+    with pytest.raises(KeyError, match="unknown debian version"):
+        debian_url("19990101", "4")
+
+
+def test_raspbian_versions_catalog_starts_with_latest_sentinel():
+    """Order matters: the `latest` sentinel must be versions[0] so
+    `latest()` returns it (Raspbian's special-case behavior)."""
+    raspbian = get_os("raspbian")
+    assert raspbian.versions[0] == "latest"
+    assert raspbian.latest() == "latest"
+
+
+def test_catalog_dated_builds_are_well_formed():
+    """Every catalog entry round-trips through its URL builder."""
+    for date in RASPBIAN_BUILDS:
+        url = raspbian_url(date, "arm64")
+        codename, file_date = RASPBIAN_BUILDS[date]
+        assert codename in url
+        assert file_date in url
+    for date in DEBIAN_BUILDS:
+        url = debian_url(date, "4")
+        assert DEBIAN_BUILDS[date] in url
