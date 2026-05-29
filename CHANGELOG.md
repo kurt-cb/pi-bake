@@ -5,6 +5,39 @@ tags via `./scripts/release-notes.sh`. To add notes for
 a new release, tag the commit with
 `git tag -a vX.Y.Z -m "..."` and re-run this script.
 
+## v0.4.1 — 2026-05-29
+
+Pi OS Lite ships /lib/systemd/system/regenerate_ssh_host_keys.service
+which on first boot rm -f's /etc/ssh/ssh_host_* and runs
+ssh-keygen -A. Latent bug since v0.2 (when ssh_host_key: was
+added for Raspbian) — never noticed because nobody could predict
+what fingerprint the Pi would actually advertise after first
+boot. v0.4's ssh_host_key: usehost made the expected fingerprint
+computable, so the discrepancy surfaced on first hardware test:
+
+  expected (usehost + hostname td-pi5-1):
+    SHA256:WfI9v7eL96tI4QQYU0mKh74YpFGKY6g94j3pQdEm0+A
+  observed from a v0.4.0-baked Pi after first boot:
+    SHA256:6aBeYqCo7+JsfdK9313AxV2RJzjo+soavFG1U3YHcgw
+
+Fix in src/pi_bake/raspbian.py: when ssh_host_key produces priv
++ pub bytes for the bake, also write an empty unit file at
+/etc/systemd/system/regenerate_ssh_host_keys.service. systemd
+treats a 0-byte unit file in /etc/systemd/system as masked
+(equivalent to `systemctl mask`), so the regen service never
+runs on first boot — our pre-baked host keys survive.
+
+Belt-and-suspenders: firstrun.sh now also calls
+`systemctl mask regenerate_ssh_host_keys.service` in case a
+future Pi OS adds a parallel regen path or moves the unit file.
+
+Side effect (good): this also closes the same bug for the
+file-path form of ssh_host_key: (v0.2+) on Raspbian — operator-
+supplied keypairs now actually stick across reboots, the way
+they always did on Alpine.
+
+Tests: 219 passed, 1 skipped.
+
 ## v0.4.0 — 2026-05-28
 
 Three additions, all driven by the same hands-on Trixie failure
