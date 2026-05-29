@@ -82,6 +82,21 @@ def test_firstrun_sh_enables_ssh_service():
     assert "systemctl enable ssh.service" in s
 
 
+def test_firstrun_sh_kills_userconfig_autologin():
+    """Pi OS Lite's first-boot setup wizard autologins as a
+    special `userconfig` user on tty1 via
+    /etc/systemd/system/getty@tty1.service.d/autologin.conf
+    and prompts for keyboard/locale/timezone/user. Headless
+    bakes have no console to interact with. raspbian.py
+    deletes the autologin.conf at bake time; firstrun.sh
+    re-deletes belt-and-suspenders."""
+    s = _firstrun_sh(_node(), "$6$abc$hash")
+    assert (
+        "rm -f /etc/systemd/system/getty@tty1.service.d/autologin.conf"
+        in s
+    )
+
+
 def test_firstrun_sh_masks_host_key_regenerator():
     """Pi OS's regenerate_ssh_host_keys.service runs once at first
     boot and `rm -f /etc/ssh/ssh_host_*` + ssh-keygen -A's. That

@@ -163,6 +163,12 @@ def _firstrun_sh(node: NodeConfig, pi_hash: str) -> str:
         "# next boot and the operator-known fingerprint stops matching.\n"
         "systemctl mask regenerate_ssh_host_keys.service 2>/dev/null || true\n"
         "\n"
+        "# Belt-and-suspenders: kill the userconfig first-boot wizard\n"
+        "# autologin on tty1. Headless bakes have no console; the\n"
+        "# prompt blocks visible-but-not-functionally-blocking forever.\n"
+        "rm -f /etc/systemd/system/getty@tty1.service.d/autologin.conf\n"
+        "rmdir /etc/systemd/system/getty@tty1.service.d 2>/dev/null || true\n"
+        "\n"
         "# Disarm legacy first-boot markers so userconf-pi.service\n"
         "# doesn't fight us on the post-reboot multi-user.target.\n"
         "rm -f /boot/firmware/userconf.txt /boot/firmware/ssh"
@@ -402,6 +408,24 @@ def _write_root_partition(root: Path, node: NodeConfig) -> None:
         imgxz.append_file(root, "etc/dhcpcd.conf", block)
         LOG.info("root: dhcpcd static IP %s via %s",
                  node.static_ipv4, node.gateway_ipv4)
+
+    # Pi OS's first-boot setup wizard autologins as a special
+    # `userconfig` user on tty1 and prompts for keyboard /
+    # locale / timezone / user creation. Headless bakes never
+    # see a console — the wizard sits at the prompt forever,
+    # blocking nothing useful but visibly unfinished if
+    # someone ever attaches HDMI. The override is at
+    # /etc/systemd/system/getty@tty1.service.d/autologin.conf;
+    # removing it lets getty@tty1 run normally (login prompt
+    # only). firstrun.sh re-deletes belt-and-suspenders for the
+    # case the file gets re-created by a Pi OS service we
+    # haven't accounted for.
+    subprocess.run(
+        ["sudo", "rm", "-f",
+         str(root / "etc/systemd/system/getty@tty1.service.d/autologin.conf")],
+        check=False,
+    )
+    LOG.info("root: removed userconfig autologin override (headless bake)")
 
     # /etc/modules for kernel module force-load (same semantics as
     # Alpine). Pi OS reads this file via systemd-modules-load.
