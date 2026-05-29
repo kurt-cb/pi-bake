@@ -90,21 +90,39 @@ output:
 #   - ~/.ssh/operator-laptop.pub
 #   - "ssh-ed25519 AAAA... pyinfra@runner"
 
-# Stable SSH host identity. Path to an OpenSSH private key file on
-# the bake host; the matching public key is read from <path>.pub.
-# Baked into /etc/ssh/ssh_host_<type>_key{,.pub} so the Pi's SSH
-# fingerprint stays the same across rebuilds — no
-# "REMOTE HOST IDENTIFICATION HAS CHANGED" warnings, no
-# pyinfra -o StrictHostKeyChecking=no needed. Generate once with:
-#   ssh-keygen -t ed25519 -N '' \
-#     -f ~/.ssh/pi-host-keys/td-pi5-1 \
-#     -C "host@td-pi5-1"
-# then back the directory up. Key type is detected from the pubkey
-# (ssh-ed25519 / ssh-rsa / ecdsa-sha2-*).
+# Stable SSH host identity. Baked into
+# /etc/ssh/ssh_host_<type>_key{,.pub} so the Pi's SSH fingerprint
+# stays the same across rebuilds — no "REMOTE HOST IDENTIFICATION
+# HAS CHANGED" warnings, no -o StrictHostKeyChecking=no needed.
+# Three accepted forms:
+#
+# 1) PATH to an OpenSSH private key on the bake host; pubkey is
+#    read from <path>.pub. Key type is detected from the pubkey
+#    (ssh-ed25519 / ssh-rsa / ecdsa-sha2-*). Generate once with:
+#      ssh-keygen -t ed25519 -N '' \
+#        -f ~/.ssh/pi-host-keys/td-pi5-1 \
+#        -C "host@td-pi5-1"
+#    then back the directory up. PRODUCTION-SAFE.
+#
+# 2) `usehost` — derive an ed25519 keypair deterministically from
+#    the hostname (SHA-256 KDF). Same hostname -> same key on any
+#    bake host, no file to manage. **NOT a SECURE option, use for
+#    testing and labs only** — the key is predictable from public
+#    info (the hostname), so anyone who can guess the hostname can
+#    compute the same private key offline and impersonate / MITM
+#    the device. Emits a runtime WARNING at bake time.
+#
+# 3) `seed:<string>` — derive ed25519 deterministically from the
+#    literal string. Useful for an HA pair or fleet-wide shared
+#    identity. **NOT a SECURE option, use for testing and labs
+#    only** — same caveat: a seed committed to a VCS recipe is
+#    public.
 #
 # Omit to let pi-bake auto-generate a fresh ed25519 pair per bake
 # (stable across reflashes of the same .img.gz; changes per build).
 # ssh_host_key: ~/.ssh/pi-host-keys/td-pi5-1
+# ssh_host_key: usehost
+# ssh_host_key: seed:fleet-2026-q2
 
 # --------------------------------------------------------------------------
 # NETWORK (eth0)

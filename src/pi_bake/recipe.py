@@ -191,15 +191,36 @@ class Recipe:
     recipes don't fail-load with "unknown key"; the value is
     ignored.
 
-    `ssh_host_key`: path to an OpenSSH private key (e.g.
-    `~/.ssh/host-keys/td-pi5-1.ed25519`). The matching public key
-    is read from `<path>.pub`. When set, the keypair is baked
-    into `/etc/ssh/ssh_host_<type>_key{,.pub}` so the Pi's SSH
+    `ssh_host_key`: how to obtain the Pi's stable SSH host
+    identity. Accepts three forms:
+
+      - A **file path** (e.g. `~/.ssh/host-keys/td-pi5-1.ed25519`):
+        baker reads the OpenSSH private key from `<path>` and the
+        matching pubkey from `<path>.pub`.
+      - `usehost`: derive an ed25519 keypair deterministically
+        from the hostname (SHA-256 KDF). Same hostname -> same
+        key, on any bake host, with no file to manage.
+        **NOT a SECURE option, use for testing and labs only**
+        — the key is predictable from the hostname, which means
+        anyone who knows the hostname can compute the private
+        key offline and impersonate / MITM the device.
+      - `seed:<string>`: derive ed25519 deterministically from
+        `<string>` literal. Use when you want to share the same
+        key across several hostnames (e.g. an HA pair), or to
+        salt with a deployment-specific secret.
+        **NOT a SECURE option, use for testing and labs only**
+        — same predictability concern as `usehost`. A seed
+        committed to a version-controlled recipe is public.
+
+    When set, the keypair is baked into
+    `/etc/ssh/ssh_host_<type>_key{,.pub}` so the Pi's SSH
     identity is stable across reflashes — no `known_hosts`
-    "REMOTE HOST IDENTIFICATION HAS CHANGED" warnings on rebuild.
-    Empty (default): the baker generates a fresh ed25519 pair at
-    bake time. Stable across reflashes of the same .img.gz;
-    changes on each new `pi-bake build`.
+    "REMOTE HOST IDENTIFICATION HAS CHANGED" warnings on
+    rebuild. Empty (default): the baker generates a fresh
+    ed25519 pair at bake time. Stable across reflashes of the
+    same .img.gz; changes on each new `pi-bake build`. For
+    production / WAN-exposed deployments, use the file-path
+    form with a per-host keypair generated from /dev/urandom.
 
     `config_txt`: list of `dtoverlay=` / `dtparam=` / etc. lines
     appended to `/boot/usercfg.txt` on the FAT partition. The
@@ -554,19 +575,10 @@ def recipe_to_node_config(r: Recipe):
     priv_bytes = b""
     pub_bytes = b""
     if r.ssh_host_key:
-        priv_path = Path(r.ssh_host_key).expanduser()
-        pub_path = Path(str(priv_path) + ".pub")
-        if not priv_path.is_file():
-            raise ValueError(
-                f"ssh_host_key private key not found: {priv_path}"
-            )
-        if not pub_path.is_file():
-            raise ValueError(
-                f"ssh_host_key public key not found: {pub_path} "
-                f"(expected at <ssh_host_key>.pub)"
-            )
-        priv_bytes = priv_path.read_bytes()
-        pub_bytes = pub_path.read_bytes()
+        from pi_bake.host_keys import resolve_host_key_spec
+        resolved = resolve_host_key_spec(r.ssh_host_key, r.hostname)
+        if resolved is not None:
+            priv_bytes, pub_bytes = resolved
 
     node = NodeConfig(
         hostname=r.hostname,

@@ -388,7 +388,7 @@ def test_recipe_to_node_config_ssh_host_key_missing_priv_errors(tmp_path):
         ssh_host_key=str(tmp_path / "does_not_exist"),
         output=OutputSpec(path="/tmp/x.img.gz"),
     )
-    with pytest.raises(ValueError, match="private key not found"):
+    with pytest.raises(ValueError, match="path not found"):
         recipe_to_node_config(r)
 
 
