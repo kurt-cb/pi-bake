@@ -5,6 +5,160 @@ tags via `./scripts/release-notes.sh`. To add notes for
 a new release, tag the commit with
 `git tag -a vX.Y.Z -m "..."` and re-run this script.
 
+## v0.4.0 — 2026-05-28
+
+Three additions, all driven by the same hands-on Trixie failure
+(pi5-smoke.yaml bake produced a flashable image, but Pi OS Trixie's
+userconf-pi created the pi user with /usr/sbin/nologin and SSH key
+login broke). Root cause was isolated 2026-05-28 by inspecting the
+failed-bake SD on a PXE-Alpine CM4: /etc/passwd had the pi user
+with /usr/sbin/nologin while /home/pi/.ssh/authorized_keys was
+correctly in place.
+
+== #21 Deterministic SSH host keys from a seed ==
+
+ssh_host_key: gains two sentinel forms in addition to the existing
+file-path form:
+
+  ssh_host_key: usehost           # derive ed25519 from hostname
+  ssh_host_key: seed:fleet-q2     # derive ed25519 from literal string
+
+SHA-256(salt + seed_input) -> 32-byte ed25519 seed -> PKCS#8 PEM.
+sshd reads PKCS#8 PEM host keys natively; ssh-keygen -y derives the
+public key. No new Python deps.
+
+NOT a SECURE option, labs only — the key is predictable from public
+info (hostname, or a seed string committed to a VCS recipe). Emits
+a runtime LOG.warning at bake time whenever a sentinel form is used.
+Module docstring + Recipe-field doc + pi-bake.example.yaml all
+carry the warning explicitly. For production / WAN-exposed devices,
+use the file-path form with a per-host keypair generated from
+/dev/urandom.
+
+KDF salt is versioned (pi-bake-host-key-v1); a future change to the
+derivation would bump it to v2 and rotate every previously baked
+deterministic key. A regression test locks the seed for hostname
+'td-pi5-1' to detect accidental tweaks.
+
+Smoke-bake verified on alpine diskless: two bakes of
+ssh_host_key: usehost produce byte-identical priv + pub keys;
+changing hostname produces a different keypair.
+
+src/pi_bake/host_keys.py + tests/test_host_keys.py (19 tests).
+
+== #22 os_version: stable/latest/<date> across all backends ==
+
+Each OSImage gains a stable_version field — pi-bake's curated
+known-good pick, may lag versions[0] deliberately. resolve_image()
+resolves two sentinels:
+
+  os_version: stable    -> OSImage.stable_version
+  os_version: latest    -> Raspbian: permanent-redirect URL;
+                           others:   catalog newest (versions[0])
+
+Raspbian + Debian catalogs expand to cover every reachable upstream
+dated build (11 Raspbian builds 2023-12 → 2026-04, both Bookworm and
+Trixie; 2 Debian raspi.debian.net tested sets). The dated URLs are
+built from (date, codename, file_date) because the upstream filename
+embeds the codename (bookworm vs trixie) and some directory dates
+differ from the file's build date by one day. RASPBIAN_BUILDS +
+DEBIAN_BUILDS dicts encode the mapping; raspbian_url() + debian_url()
+are the URL builders. resolve_image() dispatches by backend.
+
+New CLI: `pi-bake list-os-versions [--os NAME]` prints every
+selectable version per OS — sentinels at the top, then concrete
+versions with codename. `pi-bake list-os` gains a `stable` column.
+
+Per-OS stable picks:
+
+  alpine:   3.21.4    (hardware-validated on Pi 5 / CM4)
+  raspbian: 2025-05-13 (last Bookworm — sidesteps Trixie userconf-pi
+                       nologin default; see #23)
+  debian:   20231109   (last all-models tested set)
+  fedora:   43-1.6
+
+All catalog URLs HEAD-checked against upstream — every one returns
+200 (Raspbian, downloads.raspberrypi.com) or 302 (Debian,
+raspi.debian.net mirror redirect).
+
+src/pi_bake/oses.py + src/pi_bake/cli.py + tests/test_catalogs.py
+(11 new tests on top of the existing 16).
+
+== #23 Raspbian firstrun.sh first-boot mechanism ==
+
+Replaces the legacy /ssh + /userconf.txt marker race with a
+systemd.run= one-shot. Trixie's userconf-pi service was creating
+the pi user with /usr/sbin/nologin shell — SSH key auth succeeded
+then login was immediately rejected. The new firstrun.sh runs once
+before multi-user.target activates (so userconf-pi doesn't race),
+and:
+
+  1. sets hostname
+  2. creates pi user with useradd -s /bin/bash
+  3. force-sets the shell with usermod -s /bin/bash pi  ← LOAD-BEARING
+  4. sets locked random password via chpasswd -e
+  5. installs authorized_keys with pi:pi ownership + mode 600
+  6. systemctl enable ssh.service
+  7. deletes legacy /boot/firmware/{ssh,userconf.txt} so userconf-pi
+     can't re-clobber on the post-reboot multi-user boot
+  8. self-deletes + strips systemd.run/unit hooks from cmdline.txt
+  9. exits 0 -> systemd.run_success_action=reboot triggers a clean
+     boot into multi-user.target with ssh.service enabled
+
+Trigger: cmdline.txt gets these three params appended at bake-time:
+
+  systemd.run=/boot/firmware/firstrun.sh
+  systemd.run_success_action=reboot
+  systemd.unit=kernel-command-line.target
+
+The kernel-command-line.target replacement prevents multi-user from
+activating during the first-run pass — that's what stops userconf-pi
+from racing firstrun.sh.
+
+Legacy /ssh + /userconf.txt markers are still written as a fallback
+for cases where firstrun.sh fails to run (cmdline.txt corruption,
+etc.). On Bookworm both paths produce the same result; on Trixie
+firstrun.sh wins.
+
+Shell-injection defense: hostname is interpolated via repr() quoting
++ a belt-and-suspenders shell-unsafe-char check.
+NodeConfig's DNS-label validation is the primary defense.
+authorized_keys is embedded in a 'EOAUTH' heredoc and rejected if
+the keys contain the literal terminator.
+
+src/pi_bake/raspbian.py::_firstrun_sh + _patch_cmdline_txt
++ tests/test_raspbian_firstrun.py (16 tests).
+
+== Combining ==
+
+Raspbian's stable_version is 2025-05-13 (last Bookworm). Combining
+`os_version: stable` with the firstrun.sh fix gives operators two
+independent ways to dodge the Trixie regression:
+
+  1. os_version: stable  -> use Bookworm (no Trixie userconf-pi bug)
+  2. os_version: latest  -> use Trixie but with firstrun.sh override
+
+Either way the bake produces a Pi that SSHes in cleanly on first
+boot.
+
+== Tests ==
+
+218 passed, 1 skipped (ssh_host_key path tests need ssh-keygen,
+present everywhere we care). New test files:
+
+  tests/test_host_keys.py            (19 tests)
+  tests/test_raspbian_firstrun.py    (16 tests)
+  tests/test_catalogs.py             (+11 new on top of 16)
+
+== Hardware-validation note ==
+
+Raspbian firstrun.sh path has NOT yet been hardware-validated end-
+to-end on a Trixie bake; the smoke-bake host (kg-di-dev) doesn't
+have passwordless sudo for losetup. Unit tests cover the script
+content + cmdline.txt directives. Recommend the totaldns operator
+re-bake pi5-smoke.yaml with os_version: latest (Trixie) and confirm
+SSH login works on the next boot.
+
 ## v0.3.3 — 2026-05-27
 
 ONE-LINE: pi-bake build --config <recipe>.yaml with `os_mode: pxe`
