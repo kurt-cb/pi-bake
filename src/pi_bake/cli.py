@@ -96,12 +96,22 @@ def _cmd_list_boards(args: argparse.Namespace) -> int:
 def _cmd_list_os_versions(args: argparse.Namespace) -> int:
     """Per-OS table of every selectable os_version: value.
 
-    Shows the two sentinels (`latest` -> upstream-current, `stable`
-    -> pi-bake's curated known-good) plus every concrete version
-    in the catalog. For Raspbian / Debian the codename derived
-    from the catalog is included so the operator knows what
-    they're picking.
+    Shows the two sentinels (`latest` -> upstream-current,
+    `stable` -> pi-bake's stable_version pick) plus every
+    concrete version in the catalog. Each row carries:
+
+      version      — what to type as `os_version:` in a recipe
+      resolves_to  — the concrete version os_version=<that>
+                     produces today
+      status       — supported / supported/untested, derived
+                     from tested_bakes.yaml
+      tested_recipe— path to the validated recipe for
+                     supported rows (empty otherwise)
+      notes        — codename (Raspbian/Debian) or sentinel
+                     semantic
     """
+    from pi_bake.tested import load_tested_bakes, bake_status
+
     if args.os:
         try:
             oses = [get_os(args.os)]
@@ -110,20 +120,38 @@ def _cmd_list_os_versions(args: argparse.Namespace) -> int:
             return 2
     else:
         oses = list_oses()
+    bakes = load_tested_bakes()
     for o in oses:
         print(f"=== {o.name} ({o.pretty})")
         rows: list[dict] = []
         # Sentinels first
+        latest_resolves = (
+            "(upstream permanent-redirect)"
+            if o.name == "raspbian" else o.latest()
+        )
+        labake_status, latest_recipe = bake_status(
+            o.name, "latest", bakes,
+        )
         rows.append({
             "version": "latest",
-            "resolves_to": o.latest() if o.name != "raspbian"
-                          else "(upstream permanent-redirect)",
+            "resolves_to": latest_resolves,
+            "status": labake_status,
+            "tested_recipe": latest_recipe,
             "notes": "current upstream — may regress",
         })
+        stable_status, stable_recipe = bake_status(
+            o.name, o.stable(), bakes,
+        )
         rows.append({
             "version": "stable",
             "resolves_to": o.stable(),
-            "notes": "pi-bake curated known-good",
+            "status": stable_status,
+            "tested_recipe": stable_recipe,
+            "notes": (
+                "pi-bake stable pick"
+                + ("" if stable_status == "supported"
+                   else " (NOT hardware-validated)")
+            ),
         })
         for v in o.versions:
             if v == "latest":
@@ -134,13 +162,26 @@ def _cmd_list_os_versions(args: argparse.Namespace) -> int:
                 note = codename
             elif o.name == "debian" and v in DEBIAN_BUILDS:
                 note = DEBIAN_BUILDS[v]
+            v_status, v_recipe = bake_status(o.name, v, bakes)
             rows.append({
                 "version": v,
                 "resolves_to": v,
+                "status": v_status,
+                "tested_recipe": v_recipe,
                 "notes": note,
             })
-        _print_table(rows, ["version", "resolves_to", "notes"])
+        _print_table(
+            rows,
+            ["version", "resolves_to", "status",
+             "tested_recipe", "notes"],
+        )
         print()
+    print(
+        "Status is read from tested_bakes.yaml at the repo "
+        "root — `supported` rows have been hardware-validated; "
+        "`supported/untested` rows have pi-bake code + a catalog "
+        "entry but no operator-confirmed bake-flash-boot test."
+    )
     return 0
 
 

@@ -212,9 +212,11 @@ DEBIAN = OSImage(
     bake_backend="debian",
     versions=_DEBIAN_DATES_NEWEST_FIRST,
     # `stable`: 20231109 is the last "all 4 Pi models on bookworm"
-    # build. The 20231111 trixie build is Pi-4-only and untested
-    # by pi-bake. Bump when raspi.debian.net publishes a newer
-    # tested set.
+    # build. UNTESTED on real Pi hardware by pi-bake — the
+    # backend produces a configured image but no operator has
+    # bake-flash-booted it end-to-end. Treat as "best-guess
+    # catalog pick," not "known-good." Bump when raspi.debian.net
+    # publishes a newer tested set + someone confirms it boots.
     stable_version="20231109",
     url_template=(
         "https://raspi.debian.net/tested/"
@@ -272,9 +274,11 @@ FEDORA = OSImage(
     # resolver derives `{minor_version}` (the release) from the
     # leading number. Bump on each Fedora release (~6mo cadence).
     versions=("43-1.6", "42-1.1"),
-    # `stable`: 43-1.6 is current Fedora Server. No known userconf-
-    # equivalent regression — Fedora's cloud-init NoCloud flow is
-    # stable across releases.
+    # `stable`: 43-1.6 is current Fedora Server. UNTESTED on real
+    # Pi hardware — pi-bake's Fedora backend produces a configured
+    # image but Fedora ARM isn't directly Pi-bootable (operator
+    # runs arm-image-installer --target=rpi4|rpi5 after bake).
+    # Treat as "best-guess catalog pick," not "known-good."
     stable_version="43-1.6",
     url_template=(
         "https://download.fedoraproject.org/pub/fedora/linux/"
@@ -325,7 +329,14 @@ def resolve_image(
 
     `version=None` (or empty string) means "use latest known-good for
     this OS" -> versions[0]. `version="stable"` resolves to the
-    OS's curated stable_version (or versions[0] if unset).
+    OS's stable_version (or versions[0] if unset). NB: "stable"
+    means "hardware-validated known-good" only for Alpine and
+    Raspbian — pi-bake hardware-tests those. For Debian and
+    Fedora, "stable" is a best-guess upstream pick (the catalog's
+    most-recent dated build that pi-bake's loader accepts), since
+    those backends haven't been bake-flash-boot tested on real
+    Pi hardware. See `tested_bakes.yaml` for the ledger that
+    surfaces this distinction at `pi-bake list-os-versions` time.
     `board_slug` (e.g. "pi-5") is used by URL templates that
     encode the Pi model in the filename (Debian's raspi.debian.net
     convention). Default empty for back-compat — Alpine ignores it.

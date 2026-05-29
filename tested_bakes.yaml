@@ -1,0 +1,79 @@
+# pi-bake hardware-test ledger.
+#
+# Each entry records a real (board, os, os_mode, os_version)
+# combination that was bake-flash-boot tested on real Pi
+# hardware + confirmed SSH-reachable + first-boot completed
+# cleanly. Append when an operator validates a fresh bake.
+#
+# Test statuses surfaced by `pi-bake list-os-versions`:
+#
+#   supported          — entry present here for that (os,
+#                        version) combination; recipe linked
+#                        is known-good
+#   supported/untested — pi-bake has explicit code + catalog
+#                        entry but no validated bake here
+#                        (i.e. the recipe loads + the bake
+#                        produces a file, but no operator has
+#                        confirmed first-boot end-to-end)
+#   unknown            — pi-bake's URL dispatcher had to fall
+#                        back (e.g. a future Pi OS codename
+#                        with no baker; see ROADMAP #24).
+#                        Only surfaces at bake time as a
+#                        runtime WARNING.
+#
+# Schema (per entry):
+#   board:        board slug from pi-bake's catalog
+#   os:           os slug from pi-bake's catalog
+#   os_mode:      (optional) alpine-only — "diskless" / "ext4" / "pxe"
+#   version:      os_version value tested (sentinel or concrete)
+#   resolved_to:  (optional) concrete version `version` resolved to
+#                 at test time. Important for `latest` which moves
+#                 over time.
+#   tested_on:    YYYY-MM-DD
+#   tested_by:    operator id / handle
+#   recipe:       path to the recipe used (relative to repo root)
+#   notes:        one-line description of what was verified
+#
+# Conservative on what counts: "tested" means a fresh bake from
+# the linked recipe boots an unattended Pi and the operator
+# successfully ssh's in. Smoke-baking the image without flashing
+# doesn't count.
+
+tested:
+  - board: pi-5
+    os: alpine
+    os_mode: diskless
+    version: 3.21.4
+    tested_on: 2026-05-27
+    tested_by: kurtgo
+    recipe: examples/pi-5-wired-dhcp.yaml
+    notes: |
+      CM4 diskless boot: kernel + apkovl extract, init `apk add
+      --no-network` succeeds, sshd reachable, dhcpcd lease,
+      chrony sync, hostname propagates via DHCP option 12.
+
+  - board: pi-5
+    os: alpine
+    os_mode: ext4
+    version: edge
+    tested_on: 2026-05-27
+    tested_by: kurtgo
+    recipe: examples/pi-5-alpine-ext4.yaml
+    notes: |
+      CM4 ext4 sys-mode boot: losetup-baked partitioned image,
+      busybox post-install symlinks (incl /sbin/init) installed
+      at bake, first-boot `apk fix --no-network` finalizes
+      pending triggers, sshd up.
+
+  - board: pi-cm4
+    os: alpine
+    os_mode: pxe
+    version: 3.21.4
+    tested_on: 2026-05-27
+    tested_by: kurtgo
+    recipe: examples/pi-cm4-alpine-pxe.yaml
+    notes: |
+      Lab CM4 PXE boot: kernel + initramfs via TFTP, initramfs
+      wgets apkovl + signed apks over HTTP, switch_root + openrc
+      starts networking + sshd + dhcpcd + chronyd, system
+      reachable as hostname smoke-pxe.
