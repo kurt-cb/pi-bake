@@ -5,6 +5,131 @@ tags via `./scripts/release-notes.sh`. To add notes for
 a new release, tag the commit with
 `git tag -a vX.Y.Z -m "..."` and re-run this script.
 
+## v0.5.0 — 2026-05-29
+
+The v0.4.0–v0.4.2 sequence of Trixie-specific surprises
+(userconf-pi nologin, regenerate_ssh_host_keys clobber,
+userconfig wizard) made clear that Pi OS evolution will keep
+producing first-boot surprises. v0.5.0 positions the
+architecture for that trajectory + adds honest hardware-test
+status reporting.
+
+== Per-codename Raspbian baker classes ==
+
+Refactor of src/pi_bake/raspbian.py from a single module-level
+baker to a base class + per-codename subclasses sharing common
+behavior:
+
+  _RaspbianBakerBase                  — version-agnostic logic
+  ├── _RaspbianBookwormBaker          — codename = "bookworm"
+  └── _RaspbianTrixieBaker            — codename = "trixie"
+
+Today both subclasses are empty — every v0.4 fix works
+identically on Bookworm and Trixie because firstrun.sh
+sidesteps Pi-OS-specific mechanisms entirely. The class
+structure is positioning for future divergence: when a new
+Pi-OS-codename quirk applies to one codename and not the
+other, the override has one obvious home, not a scattered
+pile of `if codename == "trixie"` branches.
+
+Module-level bake() becomes a URL-driven dispatcher. Pi OS
+files are named <date>-raspios-<codename>-<arch>-lite.img.xz —
+stable convention since Buster.
+
+Unknown-codename fallback (chronology-aware):
+
+  - Newer-than-newest (e.g. a future Forky URL pi-bake hasn't
+    shipped a baker for yet) -> fall FORWARD to newest baker
+    + UNTESTED warning
+  - Older-than-oldest (e.g. Bullseye) -> fall BACKWARD to
+    oldest baker + UNTESTED warning
+  - In-between (pi-bake skipped a release) -> walk backward
+    to nearest supported neighbor (conservative direction)
+  - Unknown codename entirely -> newest baker + warning
+  - No codename in URL (_latest redirect) -> newest baker
+    silently (operator asked for upstream-current)
+
+Per-codename example recipes for copy-paste:
+
+  examples/pi-5-raspbian-bookworm.yaml — os_version: stable
+    (2025-05-13 Bookworm). Recommended for lab baseline +
+    production. Bookworm's userconf-pi creates the pi user
+    with /bin/bash; no firstrun.sh override strictly needed.
+
+  examples/pi-5-raspbian-trixie.yaml — os_version: latest
+    (Trixie via permanent redirect). pi-bake's firstrun.sh
+    handles Trixie's userconf-pi nologin default
+    automatically.
+
+== Hardware-test ledger (tested_bakes.yaml) ==
+
+A new file at the repo root tracks which (board, os, os_mode,
+os_version) combinations have been bake-flash-boot tested on
+real Pi hardware. `pi-bake list-os-versions` reads it and
+annotates each catalog row with a test status:
+
+  supported          — ledger entry for this (os, version)
+  supported/untested — pi-bake has code + catalog entry but
+                       no hardware-validated bake on file
+
+Initial ledger ships with three Alpine entries from v0.3.x
+hardware testing:
+
+  - alpine 3.21.4 diskless on Pi 5 / CM4
+  - alpine edge ext4 on Pi 5 / CM4 (sys-mode)
+  - alpine 3.21.4 pxe on CM4
+
+Honest labels for Debian + Fedora. Previous releases marked
+their stable_version as "pi-bake curated known-good" — but
+neither backend has been bake-flash-booted on real Pi
+hardware (Debian's tested-build catalog produces files;
+Fedora's image isn't even directly Pi-bootable without
+arm-image-installer). v0.5.0 reflects this honestly in the
+catalog comments + resolve_image() docstring + README.
+
+list-os-versions sample output:
+
+  === alpine (Alpine Linux)
+  version  resolves_to  status              tested_recipe                  notes
+  -------  -----------  ------------------  -----------------------------  ------
+  latest   3.21.4       supported/untested                                 current upstream
+  stable   3.21.4       supported           examples/pi-5-wired-dhcp.yaml  pi-bake stable pick
+  3.21.4   3.21.4       supported           examples/pi-5-wired-dhcp.yaml
+  3.21.3   3.21.3       supported/untested
+  ...
+
+  === debian (Debian)
+  version   resolves_to  status              tested_recipe  notes
+  --------  -----------  ------------------  -------------  --------------------------------------------
+  latest    20231111     supported/untested                 current upstream
+  stable    20231109     supported/untested                 pi-bake stable pick (NOT hardware-validated)
+  ...
+
+== API additions ==
+
+  pi_bake.tested.BakeRecord       — dataclass for one ledger entry
+  pi_bake.tested.load_tested_bakes(path=None) -> list[BakeRecord]
+  pi_bake.tested.bake_status(os_name, version, bakes=None)
+    -> (status: str, tested_recipe: str)
+
+  pi_bake.raspbian._RaspbianBakerBase     — common Pi OS baker
+  pi_bake.raspbian._RaspbianBookwormBaker — Bookworm subclass
+  pi_bake.raspbian._RaspbianTrixieBaker   — Trixie subclass
+  pi_bake.raspbian._detect_codename(url) -> str (dispatcher)
+  pi_bake.raspbian._fallback_for_unknown_codename(unknown) -> str
+
+== Tests ==
+
+245 passed, 1 skipped. New test files:
+
+  tests/test_tested.py                  (10 tests)
+  tests/test_raspbian_firstrun.py       (+9 codename-dispatch tests)
+
+Backwards-compatible: existing operator recipes continue to
+work unchanged. The `os_version:` field accepts the same values
+it did in v0.4; the new `stable` / `latest` sentinels are
+additions.
+
 ## v0.4.2 — 2026-05-29
 
 Hardware-test follow-up from v0.4.1. On the post-firstrun.sh
