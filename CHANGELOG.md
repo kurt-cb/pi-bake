@@ -5,6 +5,35 @@ tags via `./scripts/release-notes.sh`. To add notes for
 a new release, tag the commit with
 `git tag -a vX.Y.Z -m "..."` and re-run this script.
 
+## v0.4.2 — 2026-05-29
+
+Hardware-test follow-up from v0.4.1. On the post-firstrun.sh
+reboot, getty@tty1.service activates an autologin override at
+/etc/systemd/system/getty@tty1.service.d/autologin.conf that
+autologins as a special `userconfig` user. That user runs an
+interactive wizard prompting for keyboard layout / locale /
+timezone / user-password setup. Useful on a desktop Pi with
+HDMI+keyboard, useless on a headless bake — operator never
+sees the prompt, so it sits indefinitely.
+
+Visible only if you attach HDMI to a Pi pi-bake baked, which
+is exactly what the totaldns operator did 2026-05-28 testing
+v0.4.1 on real hardware:
+
+  > pre-login screen came up asking for locale information.
+  > Headless boot will never see either of these.
+
+Fix in src/pi_bake/raspbian.py:
+
+  - bake-time: `sudo rm -f /etc/systemd/system/getty@tty1.service.d/
+    autologin.conf` so getty@tty1 runs normally.
+  - firstrun.sh: re-deletes belt-and-suspenders.
+
+Tested headless bakes (Pi-bake's normal mode) get a clean
+boot path: kernel -> systemd -> ssh.service -> SSH ready.
+
+Tests: 220 passed, 1 skipped.
+
 ## v0.4.1 — 2026-05-29
 
 Pi OS Lite ships /lib/systemd/system/regenerate_ssh_host_keys.service
