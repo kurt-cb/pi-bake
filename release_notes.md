@@ -19,6 +19,7 @@ for the tag-time checklist.
 
 | Version | Date | Headline |
 |---|---|---|
+| [v0.4.0](#v040--2026-05-28--seedable-host-keys--os_version-selection--firstrunsh) | 2026-05-28 | Deterministic SSH host keys from a seed + `os_version: stable/latest/<date>` across all backends + Raspbian `firstrun.sh` (sidesteps Trixie `userconf-pi` nologin) |
 | [v0.3.3](#v033--2026-05-27--bugfix) | 2026-05-27 | Bugfix: alpine_pxe + `packages:` crash on Python 3.12 |
 | [v0.3.2](#v032--2026-05-27--alpine-pxe-backend) | 2026-05-27 | Alpine PXE backend (`os_mode: pxe`) + ext4 boot fix |
 | [v0.3.1](#v031--2026-05-27--alpine-ext4-sys-mode-backend) | 2026-05-27 | Alpine ext4 sys-mode backend (`os_mode: ext4`) |
@@ -35,6 +36,49 @@ for the tag-time checklist.
 | [v0.0.1](#v001--2026-05-23--first-real-hardware-shape) | 2026-05-23 | Static IP + time sync + WiFi firmware + RTC-less boot survival |
 
 ---
+
+## v0.4.0 — 2026-05-28 — seedable host keys + `os_version` selection + firstrun.sh
+
+Three additions, all driven by the same hands-on Trixie failure
+(`pi5-smoke.yaml` bake produced a flashable image, but Pi OS
+Trixie's `userconf-pi` created the pi user with
+`/usr/sbin/nologin` and SSH key login broke). Root cause was
+isolated by inspecting the failed SD on a PXE-Alpine CM4.
+
+- **Seedable SSH host keys** — `ssh_host_key:` accepts new
+  sentinel forms: `usehost` (derive ed25519 from the hostname)
+  or `seed:<string>` (derive from a literal seed). Same input
+  → same key on any bake host, byte-for-byte. PKCS#8 PEM
+  output that sshd reads natively. **Labs only** — emits a
+  runtime WARNING; the key is predictable from public info.
+  → [ROADMAP #21](ROADMAP.md#21-deterministic-ssh-host-keys-from-a-seed-ssh_host_key-usehost--seed),
+    [src/pi_bake/host_keys.py](src/pi_bake/host_keys.py),
+    [pi-bake.example.yaml](pi-bake.example.yaml).
+- **`os_version: stable | latest | <date>`** — each OS catalog
+  gains a `stable_version` (pi-bake's curated known-good pick
+  that may lag `latest` deliberately). Raspbian + Debian
+  catalogs expand to cover every reachable upstream dated
+  build (11 Raspbian builds 2023-12 → 2026-04, both Bookworm
+  and Trixie; 2 Debian raspi.debian.net tested sets). New
+  CLI: `pi-bake list-os-versions [--os NAME]` prints the
+  full menu per OS with codename.
+  → [ROADMAP #22](ROADMAP.md#22-os_version-selection-across-all-backends-stable--latest--dated),
+    [src/pi_bake/oses.py](src/pi_bake/oses.py).
+- **Raspbian `firstrun.sh`** — replaces the
+  `/ssh` + `/userconf.txt` marker race with a systemd.run=
+  one-shot that creates the pi user with `useradd -s /bin/bash`
+  + force-sets the shell via `usermod -s /bin/bash pi`, then
+  installs authorized_keys, enables sshd, deletes legacy
+  markers, strips its cmdline hooks, and reboots. Sidesteps
+  Trixie's userconf-pi nologin default end-to-end. Legacy
+  markers kept as a fallback for cmdline.txt-corruption cases.
+  → [ROADMAP #23](ROADMAP.md#23-raspbian-firstrunsh-first-boot-mechanism-replaces-marker-race),
+    [src/pi_bake/raspbian.py](src/pi_bake/raspbian.py).
+
+Plus: Raspbian's `stable_version` is `2025-05-13` (last
+Bookworm) — combining `os_version: stable` with the firstrun.sh
+fix gives operators two independent ways to dodge the Trixie
+regression.
 
 ## v0.3.3 — 2026-05-27 — bugfix
 

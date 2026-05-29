@@ -814,6 +814,112 @@ See `src/pi_bake/alpine_pxe.py`, `examples/pi-cm4-alpine-pxe.yaml`,
 
 ---
 
+## 21. Deterministic SSH host keys from a seed (`ssh_host_key: usehost / seed:...`)
+**✅ shipped**
+
+The existing `ssh_host_key: <path>` (v0.2) requires the operator
+to manage a per-host keypair file. For lab + CI bakes where
+the goal is "stable known_hosts across reflashes" with no
+ceremony, v0.4 adds two sentinel forms:
+
+- `ssh_host_key: usehost` — derive ed25519 deterministically
+  from the hostname (SHA-256 KDF).
+- `ssh_host_key: seed:<string>` — derive ed25519 from a
+  literal seed string. Use for HA pairs that share an identity.
+
+Implementation: SHA-256(salt + seed_input) → 32-byte ed25519
+seed → PKCS#8 PEM wrapper (sshd reads natively). ssh-keygen -y
+derives the public key. No new Python deps (stdlib + the
+system ssh-keygen that pi-bake already requires).
+
+**Security caveat — labs only.** The derived key is predictable
+from public info (hostname or a string committed to a recipe
+in version control). pi-bake emits a runtime WARNING at bake
+time whenever a sentinel form is used. For
+production / WAN-exposed devices, use the file-path form with
+a per-host keypair generated from `/dev/urandom`.
+
+KDF salt is versioned (`pi-bake-host-key-v1`); a future change
+to the derivation would bump it to v2 and rotate every
+previously baked deterministic key.
+
+See `src/pi_bake/host_keys.py`, `tests/test_host_keys.py`,
+`pi-bake.example.yaml` (annotated reference).
+
+---
+
+## 22. `os_version:` selection across all backends (`stable` / `latest` / dated)
+**✅ shipped**
+
+v0.3 left `os_version:` as a thin pass-through that mostly
+followed each backend's permanent-latest redirect. v0.4 adds
+two sentinels and a per-OS dated catalog so operators can pin
+to a known-good upstream build:
+
+- `os_version: latest` — bleeding-edge upstream. For Raspbian
+  this is Pi OS's permanent-redirect endpoint (whatever
+  upstream cuts next); for Alpine / Debian / Fedora it
+  resolves to the catalog's newest entry.
+- `os_version: stable` — pi-bake's curated known-good pick.
+  May lag `latest` deliberately to dodge upstream
+  regressions. For Raspbian this is `2025-05-13` (last
+  Bookworm — sidesteps Trixie's userconf-pi nologin default,
+  see #23). For Alpine `3.21.4`, Debian `20231109`, Fedora
+  `43-1.6`.
+- `os_version: <date>` (Raspbian/Debian) or
+  `os_version: <version>` (Alpine/Fedora) — explicit pin.
+
+New CLI: `pi-bake list-os-versions [--os NAME]` prints every
+selectable version per OS with codename (where applicable)
+and what each sentinel resolves to.
+
+Catalog covers the full upstream menus pi-bake's bake tooling
+can actually reach: Raspbian 2023-12-06 → 2026-04-21 (11
+builds, Bookworm + Trixie); Debian 20231109 + 20231111; Alpine
+3.19–3.21 + edge; Fedora 42-1.1 + 43-1.6. Catalog is bumped
+by hand on each pi-bake release until #14 (dynamic version
+discovery) ships.
+
+See `src/pi_bake/oses.py` (catalog + URL builders),
+`tests/test_catalogs.py` (sentinel + dated-URL tests),
+`pi-bake.example.yaml`.
+
+---
+
+## 23. Raspbian `firstrun.sh` first-boot mechanism (replaces marker race)
+**✅ shipped**
+
+The legacy `/boot/firmware/ssh` + `/boot/firmware/userconf.txt`
+marker scheme had a regression on Pi OS Trixie: `userconf-pi`
+creates the `pi` user with `/usr/sbin/nologin` shell. SSH
+key auth succeeds, then login is immediately rejected
+("This account is currently not available"). Bookworm worked;
+Trixie didn't — and the operator-visible symptom is "boots,
+gets to login prompt, no SSH, no password." Confirmed root
+cause 2026-05-28 by inspecting a failed-bake SD card on the
+lab CM4 PXE-Alpine.
+
+The fix: write `/firstrun.sh` to FAT root and append
+`systemd.run=/boot/firmware/firstrun.sh systemd.run_success_action=reboot
+systemd.unit=kernel-command-line.target` to `cmdline.txt`.
+The script runs once before multi-user.target activates (so
+userconf-pi doesn't race), creates the pi user with
+`useradd -s /bin/bash`, force-sets the shell with
+`usermod -s /bin/bash pi` (the load-bearing line), installs
+authorized_keys, enables sshd, deletes the legacy markers
+so userconf-pi doesn't fight us on the next boot, strips
+its own systemd.run hooks from cmdline.txt, then exits 0 →
+systemd reboots → normal Pi OS boot.
+
+The `/ssh` + `/userconf.txt` markers are still written as a
+fallback for the case firstrun.sh fails to run (cmdline.txt
+corruption, etc.).
+
+See `src/pi_bake/raspbian.py::_firstrun_sh` + `_patch_cmdline_txt`,
+`tests/test_raspbian_firstrun.py`.
+
+---
+
 ## Real-hardware lessons (informational)
 
 Lessons learned while shipping v0.0.x → v0.2 on real Pi
