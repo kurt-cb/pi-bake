@@ -1,0 +1,46 @@
+# Pi 5 (aarch64) — Raspberry Pi OS Lite, Trixie pinned.
+#
+# Pins to Pi OS Trixie's most-recent published build
+# (2026-04-21). Pick this over `stable` (Bookworm) when:
+#
+#   - You need newer kernel / firmware / packages that haven't
+#     backported to Bookworm. Trixie ships Debian 13 with
+#     fresher userspace and recent Pi 5 firmware.
+#   - You're explicitly testing pi-bake's Trixie support — the
+#     first-boot fixes in v0.4 (firstrun.sh creating the pi
+#     user with bash, masking the host-key regenerator,
+#     deleting the userconfig wizard autologin) were driven by
+#     Trixie-specific quirks.
+#
+# pi-bake handles Trixie's userconf-pi nologin-shell default
+# automatically via firstrun.sh — you don't need to do anything
+# special in this recipe to get SSH working on first boot.
+#
+# `os_version: latest` follows Pi OS's permanent-redirect
+# endpoint, which is currently Trixie (will keep moving
+# forward). For a stable pin that won't drift if upstream cuts
+# a new build, use `os_version: 2026-04-21` (the latest dated
+# Trixie build in pi-bake's catalog).
+#
+# Run `pi-bake list-os-versions --os raspbian` to see every
+# selectable version.
+
+hostname: td-pi5-trixie
+board: pi-5
+os: raspbian
+os_version: latest      # -> Pi OS's permanent-redirect (Trixie today)
+
+ssh_pubkey: ~/.ssh/totaldns-adhoc.pub
+
+# Stable per-host SSH identity. `usehost` derives ed25519
+# deterministically from the hostname — same hostname → same
+# fingerprint forever. **Labs only** — see pi-bake.example.yaml
+# for the security caveat. For production use a file-path here.
+ssh_host_key: usehost
+
+network:
+  mode: dhcp
+  send_hostname: true
+
+output:
+  path: ~/sdcards/td-pi5-trixie.img.xz

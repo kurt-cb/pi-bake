@@ -1,0 +1,50 @@
+# Pi 5 (aarch64) — Raspberry Pi OS Lite, Bookworm pinned.
+#
+# Pins to Pi OS Bookworm's last published build (2025-05-13)
+# instead of `latest` (which currently resolves to Trixie). Two
+# reasons an operator picks this over latest:
+#
+#   1) Bookworm's `userconf-pi` first-boot service creates the
+#      pi user with /bin/bash shell — matches every reference
+#      Pi OS deployment guide on the internet. Trixie flipped
+#      this to /usr/sbin/nologin which silently broke key-only
+#      SSH logins until pi-bake's firstrun.sh started overriding
+#      it (see CHANGELOG v0.4.0 — #23). Bookworm doesn't need
+#      the override.
+#   2) Bookworm has years more shakedown than Trixie. For lab
+#      baseline + production, "the boring choice" is the right
+#      one.
+#
+# Tradeoff vs. Trixie: older kernel, older packages, eventual
+# end-of-support sometime in 2028 (Debian 12 LTS schedule). For
+# headless servers + lab fleet that's fine; you can always bump
+# os_version: stable when pi-bake's catalog moves its stable
+# pick forward.
+#
+# `os_version: stable` resolves to whatever pi-bake's
+# OSImage.stable_version is set to (currently 2025-05-13). If
+# you want to pin to a literal date independent of pi-bake's
+# stable bump, use `os_version: 2025-05-13` instead.
+#
+# Run `pi-bake list-os-versions --os raspbian` to see every
+# selectable version + its codename.
+
+hostname: td-pi5-bookworm
+board: pi-5
+os: raspbian
+os_version: stable      # -> 2025-05-13 Bookworm
+
+ssh_pubkey: ~/.ssh/totaldns-adhoc.pub
+
+# Stable per-host SSH identity. `usehost` derives ed25519
+# deterministically from the hostname — same hostname → same
+# fingerprint forever. **Labs only** — see pi-bake.example.yaml
+# for the security caveat. For production use a file-path here.
+ssh_host_key: usehost
+
+network:
+  mode: dhcp
+  send_hostname: true
+
+output:
+  path: ~/sdcards/td-pi5-bookworm.img.xz
