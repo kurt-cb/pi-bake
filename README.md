@@ -167,8 +167,17 @@ Run `pi-bake list-os --board <b>` for the current matrix.
 
 ## Status
 
-All four backends (Alpine, Raspbian, Debian, Fedora) are
-working as of v0.3.3 and have been hardware-validated on a CM4.
+All four backends (Alpine, Raspbian, Debian, Fedora) produce
+bootable / configurable images as of v0.5.0. **Hardware-
+validation status differs by backend** — Alpine (all three
+modes) has been bake-flash-boot tested on a CM4; Raspbian
+has been bake-tested on a Pi 5 with the v0.5.0 firstrun.sh
+path; Debian and Fedora have not been booted by pi-bake's
+maintainers, only bake-tested. See
+[`tested_bakes.yaml`](tested_bakes.yaml) for the ledger
+(`pi-bake list-os-versions` annotates each catalog row with
+its test status: `supported` if there's a ledger entry,
+`supported/untested` otherwise).
 
 Alpine has three modes:
 

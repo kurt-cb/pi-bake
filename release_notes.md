@@ -19,6 +19,9 @@ for the tag-time checklist.
 
 | Version | Date | Headline |
 |---|---|---|
+| [v0.5.0](#v050--2026-05-29--per-codename-raspbian-bakers) | 2026-05-29 | Raspbian backend split into per-codename baker classes (Bookworm + Trixie) with chronology-aware UNTESTED-fallback dispatch + per-codename example recipes |
+| [v0.4.2](#v042--2026-05-28--skip-pi-os-userconfig-first-boot-wizard) | 2026-05-28 | Hotfix: skip Pi OS `userconfig` first-boot locale wizard on headless bakes |
+| [v0.4.1](#v041--2026-05-28--fix-pre-baked-ssh-host-keys-on-raspbian) | 2026-05-28 | Hotfix: pre-baked SSH host keys survive `regenerate_ssh_host_keys.service` first-boot wipe |
 | [v0.4.0](#v040--2026-05-28--seedable-host-keys--os_version-selection--firstrunsh) | 2026-05-28 | Deterministic SSH host keys from a seed + `os_version: stable/latest/<date>` across all backends + Raspbian `firstrun.sh` (sidesteps Trixie `userconf-pi` nologin) |
 | [v0.3.3](#v033--2026-05-27--bugfix) | 2026-05-27 | Bugfix: alpine_pxe + `packages:` crash on Python 3.12 |
 | [v0.3.2](#v032--2026-05-27--alpine-pxe-backend) | 2026-05-27 | Alpine PXE backend (`os_mode: pxe`) + ext4 boot fix |
@@ -36,6 +39,76 @@ for the tag-time checklist.
 | [v0.0.1](#v001--2026-05-23--first-real-hardware-shape) | 2026-05-23 | Static IP + time sync + WiFi firmware + RTC-less boot survival |
 
 ---
+
+## v0.5.0 — 2026-05-29 — per-codename Raspbian bakers
+
+Refactor of `src/pi_bake/raspbian.py` from a single module-
+level baker to a base class + per-codename subclasses
+(`_RaspbianBookwormBaker`, `_RaspbianTrixieBaker`) sharing a
+common `_RaspbianBakerBase`. The shape was triggered by the
+v0.4.0–v0.4.2 sequence of Trixie-specific surprises; the
+class structure means each new Pi-OS-codename quirk has one
+obvious home (an override on the matching subclass), not a
+scattered pile of `if codename == "trixie"` branches.
+
+Module-level `bake()` becomes a dispatcher that parses the
+codename from the upstream URL and routes to the matching
+baker instance.
+
+**Unknown-codename fallback strategy** (chronology-aware): a
+Debian-codename ordering lets the dispatcher reason about
+unrecognized codenames. Newer-than-newest URLs (e.g. a future
+Forky build pi-bake hasn't shipped a baker for yet) fall
+**forward** to the newest baker with an UNTESTED warning;
+older-than-oldest URLs fall **backward** to the oldest baker
+with the same warning. The `_latest` permanent-redirect
+endpoint (no codename in URL) silently uses the newest baker
+— operator's recipe is asking for upstream-current, no need
+to warn.
+
+Per-codename example recipes for copy-paste:
+- [examples/pi-5-raspbian-bookworm.yaml](examples/pi-5-raspbian-bookworm.yaml)
+  — `os_version: stable` (2025-05-13 Bookworm). Recommended
+  for lab baseline + production.
+- [examples/pi-5-raspbian-trixie.yaml](examples/pi-5-raspbian-trixie.yaml)
+  — `os_version: latest` (Trixie via permanent redirect).
+  firstrun.sh handles userconf-pi automatically.
+
+→ [ROADMAP #24](ROADMAP.md#24-raspbian-backend-per-codename-baker-classes),
+  [src/pi_bake/raspbian.py](src/pi_bake/raspbian.py),
+  [tests/test_raspbian_firstrun.py](tests/test_raspbian_firstrun.py).
+
+## v0.4.2 — 2026-05-28 — skip Pi OS userconfig first-boot wizard
+
+Hotfix from hardware testing v0.4.1. Pi OS Lite ships an
+autologin override at
+`/etc/systemd/system/getty@tty1.service.d/autologin.conf`
+that auto-logs-in as a special `userconfig` user on tty1 and
+runs an interactive locale/keyboard/timezone/user wizard.
+Useful on a desktop Pi with HDMI; useless on a headless bake
+(the prompt sits indefinitely, visible only if someone
+attaches HDMI). Removed at bake time; firstrun.sh re-deletes
+belt-and-suspenders.
+
+## v0.4.1 — 2026-05-28 — fix pre-baked SSH host keys on Raspbian
+
+Hotfix for a latent bug since v0.2. Pi OS's
+`regenerate_ssh_host_keys.service` runs once at first boot
+and does `rm -f /etc/ssh/ssh_host_*` + `ssh-keygen -A` —
+which silently clobbered any host key pi-bake had pre-baked.
+Never noticed because nobody could predict what fingerprint
+the Pi would advertise; v0.4.0's `ssh_host_key: usehost` made
+the expected fingerprint computable, surfacing the
+discrepancy on first hardware test.
+
+Fix: write an empty unit file at
+`/etc/systemd/system/regenerate_ssh_host_keys.service` —
+systemd treats a 0-byte unit file in `/etc/systemd/system`
+as masked. Pre-baked host keys now survive. Side benefit:
+closes the same bug for the v0.2 file-path form of
+`ssh_host_key:` — operator-supplied keypairs now actually
+stick across reboots on Raspbian, the way they always did
+on Alpine.
 
 ## v0.4.0 — 2026-05-28 — seedable host keys + `os_version` selection + firstrun.sh
 

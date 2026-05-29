@@ -920,6 +920,71 @@ See `src/pi_bake/raspbian.py::_firstrun_sh` + `_patch_cmdline_txt`,
 
 ---
 
+## 24. Raspbian backend: per-codename baker classes
+**✅ shipped**
+
+Pi OS evolves: Bullseye → Bookworm → Trixie → (whatever's next).
+Each release tends to slip in one or two surprises that break a
+headless bake — userconf-pi's shell default flipped from
+`/bin/bash` to `/usr/sbin/nologin` in Trixie, etc. The pattern
+that fits this trajectory is per-codename baker subclasses
+sharing a common base:
+
+```
+_RaspbianBakerBase                  — version-agnostic logic
+├── _RaspbianBookwormBaker          — codename = "bookworm"
+└── _RaspbianTrixieBaker            — codename = "trixie"
+```
+
+Today both subclasses are empty — every v0.4 fix (firstrun.sh,
+regenerate_ssh_host_keys mask, userconfig autologin removal)
+works identically on Bookworm and Trixie because firstrun.sh
+sidesteps Pi-OS-specific mechanisms entirely. When a future
+fix applies to only one codename, it lives in that codename's
+class: the override has one obvious home, no `if codename ==
+"trixie"` branches scattered through the code.
+
+The module-level `bake()` is a dispatcher: it parses the
+codename from the upstream URL (Pi OS names files
+`<date>-raspios-<codename>-<arch>-lite.img.xz`, stable since
+Buster) and routes to the matching baker instance.
+
+**Unknown-codename fallback strategy.** A Debian-codename
+chronology (`jessie / stretch / buster / bullseye / bookworm /
+trixie / forky / duke`) lets the dispatcher reason about
+unknown codenames by chronological position:
+
+- Newer-than-newest (e.g. a future Forky URL pi-bake hasn't
+  shipped a baker for yet) → fall **forward** to the newest
+  baker (Trixie today) + **WARNING**: "UNTESTED COMBINATION,
+  expect first-boot quirks the firstrun.sh script may not
+  handle."
+- Older-than-oldest (e.g. a legacy Bullseye URL) → fall
+  **backward** to the oldest baker (Bookworm today) + same
+  loud warning.
+- In between (pi-bake skipped a release) → walk backward to
+  the nearest supported neighbor (conservative direction).
+- Unknown name entirely → newest baker + warning.
+- No codename in URL (e.g. `_latest` redirect) → newest baker
+  silently (operator's recipe is asking for upstream-current,
+  warning would be noise).
+
+Per-codename example recipes that operators can copy-paste:
+
+- `examples/pi-5-raspbian-bookworm.yaml` — `os_version: stable`
+  pins to 2025-05-13 (last Bookworm). Recommended for lab
+  baseline + production.
+- `examples/pi-5-raspbian-trixie.yaml` — `os_version: latest`
+  follows Pi OS's permanent redirect (Trixie today). pi-bake's
+  firstrun.sh handles the userconf-pi nologin override
+  automatically.
+
+See `src/pi_bake/raspbian.py`,
+`tests/test_raspbian_firstrun.py`,
+`examples/pi-5-raspbian-{bookworm,trixie}.yaml`.
+
+---
+
 ## Real-hardware lessons (informational)
 
 Lessons learned while shipping v0.0.x → v0.2 on real Pi
