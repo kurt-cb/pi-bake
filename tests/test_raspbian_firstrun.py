@@ -17,7 +17,16 @@ import pytest
 
 from pi_bake.config import NodeConfig
 from pi_bake.raspbian import (
+    _BAKERS,
+    _DEFAULT_BAKER_CODENAME,
     _FIRSTRUN_CMDLINE,
+    _NEWEST_BAKER,
+    _OLDEST_BAKER,
+    _RaspbianBakerBase,
+    _RaspbianBookwormBaker,
+    _RaspbianTrixieBaker,
+    _detect_codename,
+    _fallback_for_unknown_codename,
     _firstrun_sh,
     _random_locked_password_hash,
 )
@@ -226,3 +235,165 @@ def test_random_locked_password_hash_is_unique():
     """Different bakes should never produce the same hash —
     otherwise an attacker who cracks one hash unlocks every Pi."""
     assert _random_locked_password_hash() != _random_locked_password_hash()
+
+
+# ---------- per-codename baker classes + dispatch ----------
+
+
+def test_bookworm_baker_codename_is_bookworm():
+    assert _RaspbianBookwormBaker().codename == "bookworm"
+
+
+def test_trixie_baker_codename_is_trixie():
+    assert _RaspbianTrixieBaker().codename == "trixie"
+
+
+def test_bakers_dict_has_both_codenames():
+    assert set(_BAKERS) == {"bookworm", "trixie"}
+
+
+def test_default_baker_codename_is_newest():
+    """Newest-first: fallback for unknown URLs should be the
+    newest codename we ship (currently Trixie)."""
+    assert _DEFAULT_BAKER_CODENAME == "trixie"
+
+
+def test_both_subclasses_inherit_from_base():
+    """The whole point of the refactor is shared base behavior;
+    if a subclass doesn't inherit, codename divergence would
+    require duplicating every method instead of overriding one."""
+    assert issubclass(_RaspbianBookwormBaker, _RaspbianBakerBase)
+    assert issubclass(_RaspbianTrixieBaker, _RaspbianBakerBase)
+
+
+def test_detect_codename_from_bookworm_url():
+    url = (
+        "https://downloads.raspberrypi.com/raspios_lite_arm64/"
+        "images/raspios_lite_arm64-2025-05-13/"
+        "2025-05-13-raspios-bookworm-arm64-lite.img.xz"
+    )
+    assert _detect_codename(url) == "bookworm"
+
+
+def test_detect_codename_from_trixie_url():
+    url = (
+        "https://downloads.raspberrypi.com/raspios_lite_arm64/"
+        "images/raspios_lite_arm64-2026-04-21/"
+        "2026-04-21-raspios-trixie-arm64-lite.img.xz"
+    )
+    assert _detect_codename(url) == "trixie"
+
+
+def test_detect_codename_no_token_uses_newest_silently(caplog):
+    """The Pi OS permanent-redirect URL has no codename token.
+    No WARNING — operator's recipe is asking for whatever
+    upstream serves, and we route to our newest baker as
+    the best guess for `latest`."""
+    import logging
+    with caplog.at_level(logging.INFO):
+        cn = _detect_codename(
+            "https://downloads.raspberrypi.com/raspios_lite_arm64_latest"
+        )
+    assert cn == _NEWEST_BAKER
+    # INFO is OK, WARNING is not — `_latest` is a documented
+    # case, not an error condition.
+    assert not any(r.levelno >= logging.WARNING for r in caplog.records)
+
+
+def test_detect_codename_newer_than_newest_warns_and_uses_newest(caplog):
+    """A future Forky URL with no baker -> fall forward to Trixie
+    (newest), but WARN loudly: this is an UNTESTED COMBINATION."""
+    import logging
+    url = (
+        "https://downloads.raspberrypi.com/raspios_lite_arm64/"
+        "images/raspios_lite_arm64-2027-04-01/"
+        "2027-04-01-raspios-forky-arm64-lite.img.xz"
+    )
+    with caplog.at_level(logging.WARNING):
+        cn = _detect_codename(url)
+    assert cn == _NEWEST_BAKER
+    assert any(
+        "UNTESTED" in r.message and "forky" in r.message
+        for r in caplog.records
+    )
+
+
+def test_detect_codename_older_than_oldest_warns_and_uses_oldest(caplog):
+    """A Bullseye URL (older than Bookworm, our oldest baker) ->
+    fall BACK to Bookworm and WARN. Older Pi OS releases shared
+    enough first-boot behavior with their immediate successor
+    that the closest-supported neighbor is the safest fallback."""
+    import logging
+    url = (
+        "https://downloads.raspberrypi.com/raspios_lite_arm64/"
+        "images/raspios_lite_arm64-2023-12-06/"
+        "2023-12-05-raspios-bullseye-arm64-lite.img.xz"
+    )
+    with caplog.at_level(logging.WARNING):
+        cn = _detect_codename(url)
+    assert cn == _OLDEST_BAKER
+    assert any(
+        "UNTESTED" in r.message and "bullseye" in r.message
+        for r in caplog.records
+    )
+
+
+def test_fallback_unknown_codename_uses_newest():
+    """A codename not in our chronology at all (e.g. Pi OS renames
+    a release) -> best-guess newest baker."""
+    assert _fallback_for_unknown_codename("notarealdebianrelease") == _NEWEST_BAKER
+
+
+def test_fallback_in_between_codename_picks_nearest_older():
+    """If pi-bake skipped a codename in its catalog (e.g. shipped
+    Bookworm + Trixie but not whatever fictional codename sits
+    between them), the fallback walks BACKWARDS to the nearest
+    supported one — conservative direction. Today we have no
+    gap in _BAKERS, but the logic is exercised by ensuring it
+    doesn't crash on an interpolated case."""
+    # Construct an artificial chronology with a gap to exercise
+    # the path.
+    import pi_bake.raspbian as r
+    orig = r._DEBIAN_CODENAMES_OLDEST_FIRST
+    orig_bakers = r._BAKERS.copy()
+    try:
+        # Pretend there's a 'midcodename' between bookworm + trixie
+        # and we don't have a baker for it.
+        r._DEBIAN_CODENAMES_OLDEST_FIRST = (
+            "bullseye", "bookworm", "midcodename", "trixie", "forky",
+        )
+        # _BAKERS still only has bookworm + trixie
+        assert _fallback_for_unknown_codename("midcodename") == "bookworm"
+    finally:
+        r._DEBIAN_CODENAMES_OLDEST_FIRST = orig
+        r._BAKERS.clear()
+        r._BAKERS.update(orig_bakers)
+
+
+def test_oldest_baker_is_bookworm():
+    """Catalog invariant — bookworm is our oldest shipped baker."""
+    assert _OLDEST_BAKER == "bookworm"
+
+
+def test_newest_baker_matches_default():
+    """Compat shim: _DEFAULT_BAKER_CODENAME is an alias for
+    _NEWEST_BAKER. Tests on either name verify the same thing."""
+    assert _DEFAULT_BAKER_CODENAME == _NEWEST_BAKER
+
+
+def test_subclasses_produce_identical_firstrun_today(monkeypatch):
+    """Both subclasses MUST produce identical firstrun.sh today
+    (the v0.4 fixes work on both Bookworm and Trixie because
+    firstrun.sh sidesteps Pi-OS-specific mechanisms). When this
+    test fails, that's a signal that a divergence has been
+    introduced — review whether the override belongs in the
+    correct subclass."""
+    # Stabilize the random hash so output is comparable.
+    monkeypatch.setattr(
+        "pi_bake.raspbian._random_locked_password_hash",
+        lambda: "$6$abc$hash",
+    )
+    n = _node()
+    bw = _RaspbianBookwormBaker().firstrun_sh(n, "$6$abc$hash")
+    tx = _RaspbianTrixieBaker().firstrun_sh(n, "$6$abc$hash")
+    assert bw == tx
