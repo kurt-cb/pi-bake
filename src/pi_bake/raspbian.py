@@ -4,18 +4,28 @@ Operator inputs come from NodeConfig + bake() kwargs; output is an
 `.img.xz` operator dd's to an SD card (or serves via PXE).
 
 Pi OS Lite ships as a partitioned .img.xz with:
-  - p1: vfat /boot   (~512 MB, holds bootloader + config.txt + initramfs)
-  - p2: ext4 /       (~1.5 GB, contains the OS; auto-expands on first
-                      boot via init_resize.sh to fill the SD card)
+  - p1: vfat /boot/firmware   (~512 MB, bootloader + config + initramfs)
+  - p2: ext4 /                (~1.5 GB, OS; auto-expands on first boot
+                               via init_resize.sh to fill the SD card)
 
 Pi-bake's job per bake:
   1. Fetch + decompress the .img.xz from downloads.raspberrypi.com
      (cached at ~/.cache/pi-bake/).
   2. losetup -fP the raw .img, mount both partitions (needs sudo).
   3. Boot partition writes:
-     - `/ssh` (empty marker) — Pi OS init enables sshd when it sees this
-     - `/userconf.txt` — `pi:<sha-512-crypted-pass>` to set the pi user's
-       password (mandatory on Bookworm+; default 'raspberry' is rejected)
+     - `/firstrun.sh` — pi-bake-generated first-boot script. Runs once
+       via `systemd.run=` injected into cmdline.txt, creates the pi
+       user with /bin/bash shell (sidesteps Pi OS Trixie's userconf-pi
+       nologin-default that breaks SSH login on key-only auth),
+       installs authorized_keys, enables sshd, then self-deletes.
+       This is the load-bearing first-boot mechanism since v0.4.
+     - `/ssh` + `/userconf.txt` — legacy Pi-OS first-boot markers,
+       kept as a fallback for the cases firstrun.sh fails to run
+       (e.g. cmdline.txt corruption). On Bookworm both paths produce
+       the same result; on Trixie firstrun.sh wins and pre-empts the
+       userconf-pi service.
+     - `/cmdline.txt` — get systemd.run=/boot/firmware/firstrun.sh
+       appended (one-line file; we read+rewrite).
      - `/wpa_supplicant.conf` (when wifi is configured)
      - `/usercfg.txt` (when node.config_txt is set; included by config.txt)
   4. Rootfs writes:
@@ -33,6 +43,11 @@ password. See README.
 Lessons baked in from operator experience (mirror Alpine's):
   - sshd needs a password set OR root pubkey + PermitRootLogin
     prohibit-password. Pi OS Bookworm rejects empty pi password.
+  - Pi OS Trixie's userconf-pi service creates the pi user with
+    `/usr/sbin/nologin` shell — SSH key auth succeeds then login is
+    immediately rejected. firstrun.sh sidesteps this by creating the
+    user explicitly with `-s /bin/bash` + `usermod -s /bin/bash pi`.
+    Confirmed root cause 2026-05-28 on a failed pi5-smoke bake.
   - SSH host keys regenerate on first boot unless we pre-bake them
     into /etc/ssh (see node.ssh_host_key_*); same logic as Alpine.
   - dhcpcd is Pi OS Lite's network manager (matches Alpine choice).
@@ -41,7 +56,9 @@ from __future__ import annotations
 
 import crypt
 import logging
+import os
 import secrets
+import subprocess
 import tempfile
 from pathlib import Path
 
@@ -68,6 +85,115 @@ def _random_locked_password_hash() -> str:
     salt = "$6$" + secrets.token_urlsafe(12)
     junk = secrets.token_urlsafe(32)
     return crypt.crypt(junk, salt)
+
+
+# cmdline.txt directives appended at bake-time. systemd reads these
+# as a transient unit, runs the script, and reboots on success
+# (systemd.run_success_action=reboot). systemd.unit=kernel-command-
+# line.target prevents multi-user.target from activating, so the
+# legacy userconf-pi.service doesn't race with firstrun.sh.
+_FIRSTRUN_CMDLINE = (
+    " systemd.run=/boot/firmware/firstrun.sh"
+    " systemd.run_success_action=reboot"
+    " systemd.unit=kernel-command-line.target"
+)
+
+
+def _firstrun_sh(node: NodeConfig, pi_hash: str) -> str:
+    """Render the bash script run once at first boot.
+
+    Idempotent: re-running is safe. Logs to /var/log/pi-bake-firstrun.log.
+    On success the script self-deletes and strips its systemd.run
+    additions from cmdline.txt so subsequent boots are clean.
+    """
+    # Hard-fail the bake if any field contains a shell escape — we
+    # interpolate them into a bash script and don't want to chase
+    # the operator's typos at runtime. Hostname is DNS-label-bounded;
+    # the auth keys are operator-controlled but already validated.
+    if any(c in node.hostname for c in "'\"`$\\\n"):
+        raise ValueError(
+            f"hostname {node.hostname!r} contains shell-unsafe chars"
+        )
+    if "EOAUTH" in node.authorized_keys_text():
+        raise ValueError(
+            "authorized_keys contains heredoc terminator 'EOAUTH' — "
+            "refusing to bake"
+        )
+    return (
+        "#!/bin/bash\n"
+        "# pi-bake-generated firstrun.sh — runs once via systemd.run=\n"
+        "# in cmdline.txt. Sidesteps Pi OS Trixie's userconf-pi\n"
+        "# nologin-shell default that breaks SSH login on key-only\n"
+        "# auth. Idempotent: re-running is safe.\n"
+        "set +e\n"
+        "exec >/var/log/pi-bake-firstrun.log 2>&1\n"
+        "echo \"pi-bake firstrun.sh starting at $(date)\"\n"
+        "\n"
+        "# Hostname.\n"
+        f"echo {node.hostname!r} > /etc/hostname\n"
+        f"hostname {node.hostname!r}\n"
+        "sed -i '/^127\\.0\\.1\\.1/d' /etc/hosts\n"
+        f"echo $'127.0.1.1\\t{node.hostname}' >> /etc/hosts\n"
+        "\n"
+        "# pi user: create if missing, then force /bin/bash shell.\n"
+        "# Trixie's userconf-pi defaults to /usr/sbin/nologin; the\n"
+        "# usermod below is the load-bearing fix.\n"
+        "if ! id pi >/dev/null 2>&1; then\n"
+        "  useradd -m -G sudo,video,audio,plugdev,users,games,input"
+        " -s /bin/bash pi\n"
+        "fi\n"
+        "usermod -s /bin/bash pi\n"
+        f"echo 'pi:{pi_hash}' | chpasswd -e\n"
+        "\n"
+        "# Authorized_keys for pi.\n"
+        "install -o pi -g pi -m 700 -d /home/pi/.ssh\n"
+        "cat > /home/pi/.ssh/authorized_keys <<'EOAUTH'\n"
+        f"{node.authorized_keys_text()}"
+        "EOAUTH\n"
+        "chown pi:pi /home/pi/.ssh/authorized_keys\n"
+        "chmod 600 /home/pi/.ssh/authorized_keys\n"
+        "\n"
+        "# Enable sshd. ssh.service is installed but not enabled by\n"
+        "# default on Pi OS Lite.\n"
+        "systemctl enable ssh.service 2>/dev/null || true\n"
+        "\n"
+        "# Disarm legacy first-boot markers so userconf-pi.service\n"
+        "# doesn't fight us on the post-reboot multi-user.target.\n"
+        "rm -f /boot/firmware/userconf.txt /boot/firmware/ssh"
+        " /boot/userconf.txt /boot/ssh\n"
+        "\n"
+        "# Self-cleanup: remove this script + strip the systemd.run\n"
+        "# hook from cmdline.txt so the next boot is clean.\n"
+        "rm -f /boot/firmware/firstrun.sh /boot/firstrun.sh\n"
+        "for c in /boot/firmware/cmdline.txt /boot/cmdline.txt; do\n"
+        "  [ -f \"$c\" ] || continue\n"
+        "  sed -i 's| systemd\\.run[^ ]*||g; s| systemd\\.unit[^ ]*||g'"
+        " \"$c\"\n"
+        "done\n"
+        "echo \"pi-bake firstrun.sh done at $(date)\"\n"
+        "exit 0\n"
+    )
+
+
+def _patch_cmdline_txt(boot: Path) -> None:
+    """Append the systemd.run= directives to /boot/firmware/cmdline.txt.
+
+    cmdline.txt is a single line; we read, rstrip, append, write back.
+    No partial-state risk: if write fails the original stays intact
+    on the FAT (mtools-style atomic-ish for small files).
+    """
+    cmdline = boot / "cmdline.txt"
+    if os.geteuid() == 0:
+        original = cmdline.read_text().rstrip("\r\n ")
+    else:
+        original = subprocess.check_output(
+            ["sudo", "cat", str(cmdline)],
+        ).decode().rstrip("\r\n ")
+    # Idempotent: don't append if already present (re-bake-safe).
+    if "systemd.run=/boot/firmware/firstrun.sh" in original:
+        return
+    new = original + _FIRSTRUN_CMDLINE + "\n"
+    imgxz.write_file(boot, "cmdline.txt", new, mode=0o644)
 
 
 def bake(
@@ -118,23 +244,36 @@ def bake(
 # --------------------------------------------------------------------------- #
 
 def _write_boot_partition(boot: Path, node: NodeConfig) -> None:
-    """All boot-partition edits: sshd marker, userconf, wifi,
-    config_txt additions. These are world-readable since FAT
-    has no perm semantics anyway."""
+    """All boot-partition edits: firstrun.sh + cmdline.txt patch,
+    legacy ssh+userconf fallback markers, wifi, config_txt
+    additions. FAT has no perm semantics so mode is mostly
+    advisory."""
 
-    # `ssh` empty marker: Pi OS Lite's init enables sshd when it
-    # sees this file. Removed after first boot.
-    imgxz.write_file(boot, "ssh", b"", mode=0o644)
-    LOG.info("boot: /ssh marker written")
+    pi_hash = _random_locked_password_hash()
 
-    # userconf.txt: `<user>:<sha-512-crypted-password>` — required
-    # by Bookworm+ to set up the default 'pi' user. We bake a random
-    # locked-out password; password auth is separately disabled.
-    pi_pass = _random_locked_password_hash()
+    # firstrun.sh: the load-bearing first-boot mechanism since v0.4.
+    # Creates the pi user with /bin/bash shell, installs authorized
+    # keys, enables sshd, then self-deletes. Triggered by the
+    # systemd.run= directive appended to cmdline.txt below.
     imgxz.write_file(
-        boot, "userconf.txt", f"pi:{pi_pass}\n", mode=0o600,
+        boot, "firstrun.sh", _firstrun_sh(node, pi_hash), mode=0o755,
     )
-    LOG.info("boot: /userconf.txt with random locked pi password")
+    _patch_cmdline_txt(boot)
+    LOG.info("boot: /firstrun.sh + cmdline.txt systemd.run= hook")
+
+    # Legacy first-boot markers — kept as a fallback for the case
+    # firstrun.sh fails to run (cmdline.txt corruption, etc.). On
+    # Bookworm both paths produce the same result; on Trixie
+    # firstrun.sh wins and pre-empts userconf-pi.service. The
+    # firstrun.sh self-cleanup also deletes these so userconf-pi
+    # doesn't re-run on the post-reboot multi-user boot.
+    imgxz.write_file(boot, "ssh", b"", mode=0o644)
+    LOG.info("boot: /ssh marker written (fallback)")
+
+    imgxz.write_file(
+        boot, "userconf.txt", f"pi:{pi_hash}\n", mode=0o600,
+    )
+    LOG.info("boot: /userconf.txt with random locked pi password (fallback)")
 
     # wpa_supplicant.conf for wifi. Pi OS Bookworm moved away from
     # this file (NetworkManager is the default now), but the
