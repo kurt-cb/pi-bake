@@ -23,3 +23,9 @@ dist/
 /nfs_lxc_setup.md
 /ngnix_setup.md
 /design/security_notes.txt
+
+# Operator-local lab automation (NFS server, etc.) — pi-bake's
+# contract stops at "produces tarball + cmdline.txt"; how the
+# operator stands up the NFS server is their domain.
+/scripts/setup-nfs-container.sh
+/scripts/teardown-nfs-container.sh
