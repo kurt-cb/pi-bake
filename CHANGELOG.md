@@ -5,6 +5,67 @@ tags via `./scripts/release-notes.sh`. To add notes for
 a new release, tag the commit with
 `git tag -a vX.Y.Z -m "..."` and re-run this script.
 
+## v0.6.2 — 2026-05-30
+
+Patch release driven by end-to-end Raspbian PXE NFS-root
+validation on a real CM4. Three small but real items:
+
+== pi-cm3 / pi-cm4 / pi-cm5 catalog entries ==
+
+Compute Module variants now have their own catalog entries
+instead of being coerced into pi-3 / pi-4 / pi-5. They share
+the SoC + Pi OS image as their consumer-Pi family member,
+but distinct entries are for catalog clarity — operators pick
+what they actually have.
+
+Updated supports_boards on Alpine / Raspbian / Debian /
+Fedora to include the CM variants per their SoC:
+
+  pi-cm3 -> alpine + raspbian + debian (BCM2837)
+  pi-cm4 -> alpine + raspbian + debian + fedora (BCM2711)
+  pi-cm5 -> alpine + raspbian + fedora (BCM2712)
+
+== Example hostnames cleaned of project leak ==
+
+Recipes previously used `td-pi5-1`, `td-cm4` etc.; the `td-`
+prefix was leftover from operator's totaldns project. Renamed
+to generic board+purpose names — same pattern as the v0.5.1
+ssh_pubkey glob cleanup. Examples should describe the board
++ use case, not anyone's specific deployment.
+
+  td-pi5-1        -> pi5-wired
+  td-pi5-bookworm -> pi5-bookworm
+  td-pi5-trixie   -> pi5-trixie
+  td-pi5-ext4     -> pi5-ext4
+  td-pi0w-1       -> pi0w-lab
+  td-pi0-1        -> pi02w-wifi
+  td-cm4-1        -> cm4-lab
+  td-cm4          -> cm4-lab
+
+== raspbian.py bugfixes from v0.6.1 refactor ==
+
+Caught while doing live bakes in the privileged pi-bake LXC
+container:
+
+  1. `user_name` -> `users` (list) in legacy fallback-markers
+     guard. Missed in v0.6.1 multi-user refactor; raspbian
+     bakes crashed with AttributeError when run without an
+     operator user block.
+
+  2. Direct `unlink` (not `sudo rm -f`) when already euid 0.
+     Pi-bake's privileged-LXC bake environment runs as root
+     without sudo installed; the bake threw
+     "[Errno 2] No such file or directory: 'sudo'" trying to
+     remove the userconfig autologin override.
+
+284 tests pass.
+
+== ROADMAP #27 v0.7.0 design notes ==
+
+End-to-end CM4 NFS-root validation surfaced the full
+service-mask + config-strip + A/B-NFS spec for v0.7.0
+raspbian_pxe.py. See ROADMAP.md #27 for the complete list.
+
 ## v0.6.1 — 2026-05-30
 
 `user:` (v0.6.0) was a single block — one operator-named login
