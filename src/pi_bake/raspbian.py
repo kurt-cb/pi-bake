@@ -415,11 +415,11 @@ class _RaspbianBakerBase:
         # userconf-pi doesn't fire on the post-reboot multi-user
         # boot.
         #
-        # When the operator has chosen a named user (node.user_name
-        # set), the legacy markers WOULD create a `pi` user the
+        # When the operator has chosen named users (node.users non-
+        # empty), the legacy markers WOULD create a `pi` user the
         # operator doesn't want — skip them. If firstrun.sh fails
         # in that case the bake is broken and operator reflashes.
-        if not node.user_name:
+        if not node.users:
             imgxz.write_file(boot, "ssh", b"", mode=0o644)
             LOG.info("boot: /ssh marker written (fallback)")
 
@@ -433,8 +433,8 @@ class _RaspbianBakerBase:
         else:
             LOG.info(
                 "boot: skipping /ssh + /userconf.txt fallback markers "
-                "(named user %r; firstrun.sh creates them instead)",
-                node.user_name,
+                "(named users %s; firstrun.sh creates them instead)",
+                [u.name for u in node.users],
             )
 
         # wpa_supplicant.conf for wifi. Pi OS Bookworm moved away
@@ -559,11 +559,21 @@ class _RaspbianBakerBase:
         # /etc/systemd/system/getty@tty1.service.d/autologin.conf;
         # removing it lets getty@tty1 run normally. firstrun.sh
         # re-deletes belt-and-suspenders.
-        subprocess.run(
-            ["sudo", "rm", "-f",
-             str(root / "etc/systemd/system/getty@tty1.service.d/autologin.conf")],
-            check=False,
+        autologin = (
+            root / "etc/systemd/system/getty@tty1.service.d/autologin.conf"
         )
+        if os.geteuid() == 0:
+            # Already root (e.g. privileged LXC container) — direct
+            # unlink, no sudo needed (and possibly no sudo installed).
+            try:
+                autologin.unlink()
+            except FileNotFoundError:
+                pass
+        else:
+            subprocess.run(
+                ["sudo", "rm", "-f", str(autologin)],
+                check=False,
+            )
         LOG.info("root: removed userconfig autologin override (headless bake)")
 
         # /etc/modules for kernel module force-load (same semantics
