@@ -985,6 +985,117 @@ See `src/pi_bake/raspbian.py`,
 
 ---
 
+## 25. EEPROM rescue SD image (`pi-bake rescue`)
+**📋 planned — design only**
+
+Pi 4 / CM4 / Pi 5 boards boot from an EEPROM that occasionally
+needs a clean reflash (after a bad update, a power cut during
+firmware write, an accidental EEPROM corruption from a hack
+attempt). Raspberry Pi publishes a rescue mechanism: boot the
+Pi with a special FAT-formatted SD containing `recovery.bin` +
+`pieeprom.bin` + `pieeprom.sig`, and the boot loader reflashes
+itself from those files.
+
+rpi-imager has this built-in under "Misc utility images →
+Bootloader". pi-bake could ship the same as a subcommand:
+
+```
+pi-bake rescue --board pi-5 --out rescue.img.gz
+pi-bake rescue --board pi-4 --out rescue.img.gz   # also CM4
+```
+
+Source files come from
+[github.com/raspberrypi/rpi-eeprom](https://github.com/raspberrypi/rpi-eeprom)'s
+release tarballs:
+- `firmware-2711/` — Pi 4 + CM4
+- `firmware-2712/` — Pi 5
+
+Implementation sketch (~250 LOC + new module):
+
+1. New `src/pi_bake/eeprom.py`:
+   - download `rpi-eeprom-<release>.tar.gz` from GitHub releases
+   - extract `firmware-27{11,12}/{recovery.bin,pieeprom.bin,pieeprom.sig}`
+   - assemble a small FAT image (mtools, like Alpine baker)
+   - copy the rescue files into FAT root
+   - return `.img.gz`
+
+2. New `oses.py` entry for the rpi-eeprom catalog —
+   independent of Pi OS versions.
+
+3. New CLI subcommand `rescue` with `--board`, `--out`,
+   optional `--rpi-eeprom-version` (default: latest).
+
+4. Tests: catalog lookup, URL build, FAT assembly with stub
+   files.
+
+Hardware validation required: actually flash + boot on a Pi
+with an intentionally-bricked EEPROM to confirm the rescue
+sequence triggers. That part can't be unit-tested.
+
+Deferred from v0.6.0 because (a) the bake-time download from
+GitHub releases is a new external dep that needs care, and
+(b) hardware validation needs a specific test rig.
+
+---
+
+## 26. Display info-screen (HDMI / SPI / I2C)
+**📋 planned — design only**
+
+A baked-in helper that surfaces login / network info on an
+attached display so the operator can see hostname + IP without
+needing a console. Tier list by display type:
+
+**Tier 1 (easy): HDMI.** Customize `/etc/issue` so the login
+banner on tty1 shows hostname + eth0 IP + wlan0 IP + SSH
+fingerprint. Bash escape sequences (`\4{eth0}`, `\n`) cover
+most of it; pi-bake bakes a templated `/etc/issue`. ~30 LOC.
+No service, no rendering, no driver questions. Works on any
+Pi with HDMI attached.
+
+**Tier 2 (medium): SPI TFT (ILI9341 / ST7789 / HX8357).**
+fbtft kernel driver exposes the panel as /dev/fb1; a small
+Python service renders text. Per-display dtoverlay needed
+(`tft35a` for 3.5", `pitft28-resistive` for Adafruit 2.8",
+etc.). ~150 LOC + systemd unit + dtoverlay registry. Schema:
+
+```yaml
+display:
+  type: spi-fbtft
+  dtoverlay: tft35a       # operator picks the right one
+  rotate: 90              # optional
+  fields: [hostname, eth_ip, wifi_ssid, wifi_ip, ssh_fp]
+```
+
+**Tier 3 (harder): I2C OLED (SSD1306 0.96").** Tiny char-only
+display; needs the luma.oled python library + a per-update
+script. ~100 LOC + systemd unit. Schema similar to tier 2:
+
+```yaml
+display:
+  type: i2c-ssd1306
+  i2c_address: 0x3c
+  width: 128
+  height: 32
+  fields: [hostname, eth_ip]
+```
+
+Common across all tiers: a `pi-bake error-info <code>`
+subcommand that prints recovery instructions (operator pulls
+SD, boots a recovery image, etc.) when the live display shows
+an error code. Out of scope for the display feature itself
+— that's a separate CLI utility.
+
+**Suggested order**: ship tier 1 (HDMI /etc/issue) as a
+quick win, then SPI as a follow-up with one tested dtoverlay
+(`tft35a` is the most common in lab use), then I2C if
+demand surfaces.
+
+Deferred from v0.6.0 because tier 2 + 3 each need hardware
+test on a specific display panel, and we don't have one to
+validate against.
+
+---
+
 ## Real-hardware lessons (informational)
 
 Lessons learned while shipping v0.0.x → v0.2 on real Pi

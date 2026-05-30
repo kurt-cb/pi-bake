@@ -19,6 +19,8 @@ for the tag-time checklist.
 
 | Version | Date | Headline |
 |---|---|---|
+| [v0.6.0](#v060--2026-05-29--named-user--dtparam-shortcuts) | 2026-05-29 | Named user replaces default `pi` + generic `dtparam:` config.txt shortcuts |
+| [v0.5.1](#v051--2026-05-29--locale--timezone-for-raspbian--sample-cleanup) | 2026-05-29 | Raspbian timezone gap fixed + `locale:` field + ssh_pubkey glob + sample cleanup |
 | [v0.5.0](#v050--2026-05-29--per-codename-raspbian-bakers) | 2026-05-29 | Raspbian backend split into per-codename baker classes (Bookworm + Trixie) with chronology-aware UNTESTED-fallback dispatch + per-codename example recipes |
 | [v0.4.2](#v042--2026-05-28--skip-pi-os-userconfig-first-boot-wizard) | 2026-05-28 | Hotfix: skip Pi OS `userconfig` first-boot locale wizard on headless bakes |
 | [v0.4.1](#v041--2026-05-28--fix-pre-baked-ssh-host-keys-on-raspbian) | 2026-05-28 | Hotfix: pre-baked SSH host keys survive `regenerate_ssh_host_keys.service` first-boot wipe |
@@ -39,6 +41,65 @@ for the tag-time checklist.
 | [v0.0.1](#v001--2026-05-23--first-real-hardware-shape) | 2026-05-23 | Static IP + time sync + WiFi firmware + RTC-less boot survival |
 
 ---
+
+## v0.6.0 — 2026-05-29 — named user + `dtparam:` shortcuts
+
+Two operator-quality-of-life additions plus two new ROADMAP
+items (EEPROM rescue + display info-screen, design only —
+deferred to focused future sessions).
+
+- **Named primary login user.** New `user:` recipe block
+  replaces the default `pi` user on Raspbian bakes. Modern
+  security: well-known default usernames are attack-targets.
+  firstrun.sh creates the named user with bash shell + the
+  listed groups + the operator's authorized_keys + a locked
+  random password; the legacy `/ssh` + `/userconf.txt`
+  fallback markers are also skipped so userconf-pi never
+  fires. Raspbian-only for v0.6.0 — Alpine bakes silently
+  ignore the block (Alpine's convention is root-as-operator).
+  → [ROADMAP item omitted — this shipped with the schema
+    addition + raspbian.py update](src/pi_bake/raspbian.py)
+- **Generic `dtparam:` block.** Each `<key>: <value>` entry
+  becomes a `dtparam=<key>=<value>` line in config.txt
+  (prepended ahead of operator's explicit `config_txt:`
+  list). Pi OS Bookworm+ ships SPI / I2C / 1-Wire disabled by
+  default — this is the convenience shortcut for enabling
+  them without hand-writing the dtparam line. YAML auto-
+  coerces `on`/`off` to bools; pi-bake normalizes them back
+  to config.txt strings. For anything that doesn't fit the
+  `dtparam=` prefix (`enable_uart=1`, `dtoverlay=...`,
+  `gpu_mem=...`), use `config_txt:` directly.
+  → [pi-bake.example.yaml](pi-bake.example.yaml)
+
+ROADMAP additions:
+
+- **#25 EEPROM rescue SD image** (`pi-bake rescue`). Pi 4/CM4/
+  Pi 5 EEPROM reflash mechanism, equivalent to rpi-imager's
+  "Misc utility images → Bootloader". Designed; deferred
+  because hardware validation needs a Pi with an
+  intentionally-bricked EEPROM to test against.
+- **#26 Display info-screen** (HDMI / SPI / I2C). Surfaces
+  hostname + IP + SSH fingerprint on an attached display.
+  Three tiers (HDMI /etc/issue / SPI fbtft / I2C SSD1306),
+  each with different test requirements. Designed; deferred
+  because tier 2+3 need specific display panels to validate.
+  → [ROADMAP #26](ROADMAP.md#26-display-info-screen-hdmi--spi--i2c)
+
+## v0.5.1 — 2026-05-29 — locale + timezone for Raspbian + sample cleanup
+
+- **Raspbian timezone gap closed** — latent bug since v0.2,
+  `NodeConfig.timezone` was a documented field but
+  raspbian.py silently dropped the value. firstrun.sh now
+  writes `/etc/timezone` + the `/etc/localtime` symlink.
+- **`locale:` field added.** Default `en_GB.UTF-8` (matches
+  Pi OS Lite shipping default — no surprise change). On
+  first boot firstrun.sh sed-uncomments the line in
+  `/etc/locale.gen`, runs `locale-gen`, then `update-locale
+  LANG=<locale>`.
+- **Sample cleanup:** ssh_pubkey gains glob support
+  (`~/.ssh/*.pub` matches all keys alphabetically); examples
+  + reference YAML stripped of operator-specific paths
+  (`~/sdcards/` and `totaldns-adhoc.pub`).
 
 ## v0.5.0 — 2026-05-29 — per-codename Raspbian bakers
 

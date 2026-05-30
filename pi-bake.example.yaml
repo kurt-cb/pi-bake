@@ -99,6 +99,44 @@ output:
 #   - ~/.ssh/operator-laptop.pub
 #   - "ssh-ed25519 AAAA... pyinfra@runner"
 
+# Operator-named primary login user. Replaces the default `pi`
+# user (Raspbian) when set. Modern security practice: well-known
+# default usernames are attack-targets; a named user is less
+# guess-prone. firstrun.sh creates the user with bash shell + the
+# listed groups + your authorized_keys + a locked random password
+# (key auth only). When `user:` is set the legacy `/ssh` and
+# `/userconf.txt` markers are also skipped — the `pi` user is
+# never created.
+#
+# Raspbian-only for v0.6.0. Alpine bakes silently ignore this
+# block (Alpine's convention is root-as-operator; named-user
+# support for Alpine is a future enhancement).
+#
+# Required when block present: `name` (Unix login-name format).
+# Optional: `groups` (defaults to the same set Pi OS gives `pi`),
+# `shell` (defaults to /bin/bash).
+# user:
+#   name: kurt
+#   groups: [sudo, video, audio, plugdev, gpio, i2c, spi]
+#   shell: /bin/bash
+
+# dtparam shortcuts. Each entry becomes a `dtparam=<key>=<value>`
+# line in /boot/firmware/config.txt (via usercfg.txt include).
+# Useful for the hardware-interface toggles Pi OS Bookworm+
+# disabled by default — spi, i2c_arm, audio, etc.
+#
+# YAML's `on` / `off` auto-coerce to booleans; pi-bake normalizes
+# them back to the config.txt convention ("on" / "off" strings).
+# Numeric values pass through unchanged.
+#
+# For anything that doesn't fit the dtparam= prefix (enable_uart=1,
+# dtoverlay=..., gpu_mem=..., etc.) use `config_txt:` directly
+# further below.
+# dtparam:
+#   spi: on
+#   i2c_arm: on
+#   audio: on
+
 # Stable SSH host identity. Baked into
 # /etc/ssh/ssh_host_<type>_key{,.pub} so the Pi's SSH fingerprint
 # stays the same across rebuilds — no "REMOTE HOST IDENTIFICATION
