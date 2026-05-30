@@ -5,6 +5,74 @@ tags via `./scripts/release-notes.sh`. To add notes for
 a new release, tag the commit with
 `git tag -a vX.Y.Z -m "..."` and re-run this script.
 
+## v0.5.1 — 2026-05-30
+
+Three related fixes for honest defaults:
+
+== Raspbian timezone gap closed ==
+
+Latent bug since v0.2. NodeConfig.timezone was a documented
+schema field but raspbian.py silently dropped the value —
+operator's `timezone: America/New_York` in a Raspbian recipe
+yielded a Pi up as UTC. Alpine has always written
+/etc/timezone; Raspbian didn't.
+
+firstrun.sh now writes both /etc/timezone + the
+/etc/localtime symlink directly (not via `timedatectl`,
+which needs dbus that may not be up inside
+kernel-command-line.target).
+
+== Locale field added ==
+
+NodeConfig + Recipe gain a `locale: str` field, default
+"en_GB.UTF-8" (matches Pi OS Lite's shipped default — no
+surprise change for existing recipes). Set `locale:
+en_US.UTF-8` (or any glibc locale) to override.
+
+firstrun.sh applies it on first boot by:
+
+  - sed-uncommenting the line in /etc/locale.gen
+  - running locale-gen <locale>
+  - update-locale LANG=<locale>
+
+Pi OS Lite ships only en_GB.UTF-8 pre-generated; any other
+locale needs explicit generation at first boot.
+
+Only the encoding part (UTF-8) matters for most CLI work;
+the en_US vs en_GB choice is mostly cosmetic — date formats,
+number separators, etc.
+
+== Sample cleanup ==
+
+- ssh_pubkey: glob support. `_resolve_pubkey()` now handles
+  patterns like `~/.ssh/*.pub` (expanded via glob.glob()).
+  All matched files are read + concatenated alphabetically
+  into a multi-line authorized_keys-ready string. Errors
+  loudly when the glob matches zero files. Plain paths
+  unchanged.
+
+- examples/ and pi-bake.example.yaml swept:
+
+    output.path: ~/sdcards/<name>.img.gz -> <name>.img.gz
+    ssh_pubkey: ~/.ssh/totaldns-adhoc.pub -> ~/.ssh/*.pub
+
+  Sample recipes shouldn't carry operator-specific paths or
+  identifiers (the totaldns key was leftover from before
+  pi-bake was a separate project).
+
+- Per-codename Raspbian examples (bookworm + trixie) add
+  timezone: America/New_York + locale: en_US.UTF-8 to
+  demonstrate the v0.5.1 schema additions.
+
+== Tests ==
+
+262 passed, 1 skipped. 12 new tests:
+
+  tests/test_recipe.py:                4 locale field tests
+                                       4 ssh_pubkey glob tests
+  tests/test_raspbian_firstrun.py:     5 timezone + locale
+                                         + shell-safety tests
+
 ## v0.5.0 — 2026-05-29
 
 The v0.4.0–v0.4.2 sequence of Trixie-specific surprises
