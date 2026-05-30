@@ -827,3 +827,262 @@ def test_ssh_pubkey_path_without_glob_chars_unchanged(tmp_path):
     from pi_bake.recipe import _resolve_pubkey
     out = _resolve_pubkey(str(p))
     assert out == "ssh-ed25519 AAAA-SINGLE op@host"
+
+
+# --------------------------------------------------------------------------- #
+# user: block (v0.6.0+)                                                        #
+# --------------------------------------------------------------------------- #
+
+def test_user_block_loads_from_yaml(tmp_path):
+    """`user:` block with name only — groups + shell default."""
+    src = tmp_path / "r.yaml"
+    src.write_text(f'''
+hostname: foo
+board: pi-5
+os: raspbian
+ssh_pubkey: "{_PUBKEY}"
+user:
+  name: kurt
+output:
+  path: /tmp/x.img.xz
+''')
+    r = load_recipe(src)
+    assert r.user is not None
+    assert r.user.name == "kurt"
+    assert "sudo" in r.user.groups   # default
+    assert r.user.shell == "/bin/bash"
+
+
+def test_user_block_explicit_groups_and_shell(tmp_path):
+    src = tmp_path / "r.yaml"
+    src.write_text(f'''
+hostname: foo
+board: pi-5
+os: raspbian
+ssh_pubkey: "{_PUBKEY}"
+user:
+  name: kurt
+  groups:
+    - sudo
+    - docker
+  shell: /usr/bin/zsh
+output:
+  path: /tmp/x.img.xz
+''')
+    r = load_recipe(src)
+    assert r.user.groups == ["sudo", "docker"]
+    assert r.user.shell == "/usr/bin/zsh"
+
+
+def test_user_block_missing_name_raises(tmp_path):
+    src = tmp_path / "r.yaml"
+    src.write_text(f'''
+hostname: foo
+board: pi-5
+os: raspbian
+ssh_pubkey: "{_PUBKEY}"
+user:
+  groups: [sudo]
+output:
+  path: /tmp/x.img.xz
+''')
+    with pytest.raises(ValueError, match="user.name is required"):
+        load_recipe(src)
+
+
+def test_user_block_invalid_username_raises(tmp_path):
+    """Username must be a valid Unix login name — alphanum + _- only,
+    must start with a letter or underscore. Otherwise useradd fails
+    at first-boot and we want it to fail at bake time instead."""
+    src = tmp_path / "r.yaml"
+    src.write_text(f'''
+hostname: foo
+board: pi-5
+os: raspbian
+ssh_pubkey: "{_PUBKEY}"
+user:
+  name: "1cantstartwithdigit"
+output:
+  path: /tmp/x.img.xz
+''')
+    with pytest.raises(ValueError, match="valid Unix username"):
+        load_recipe(src)
+
+
+def test_user_block_shell_injection_rejected(tmp_path):
+    """Shell path is interpolated into bash; reject metachars."""
+    src = tmp_path / "r.yaml"
+    src.write_text(f'''
+hostname: foo
+board: pi-5
+os: raspbian
+ssh_pubkey: "{_PUBKEY}"
+user:
+  name: kurt
+  shell: "/bin/bash; rm -rf /"
+output:
+  path: /tmp/x.img.xz
+''')
+    with pytest.raises(ValueError, match="shell-unsafe"):
+        load_recipe(src)
+
+
+def test_user_block_unknown_subkey_rejected(tmp_path):
+    src = tmp_path / "r.yaml"
+    src.write_text(f'''
+hostname: foo
+board: pi-5
+os: raspbian
+ssh_pubkey: "{_PUBKEY}"
+user:
+  name: kurt
+  homedir: /opt/kurt
+output:
+  path: /tmp/x.img.xz
+''')
+    with pytest.raises(ValueError, match="unknown key"):
+        load_recipe(src)
+
+
+def test_user_block_threaded_to_node_config():
+    from pi_bake.recipe import UserSpec
+    r = Recipe(
+        hostname="t", board="pi-5", os="raspbian",
+        ssh_pubkey=_PUBKEY,
+        user=UserSpec(name="kurt", groups=["sudo", "docker"]),
+        output=OutputSpec(path="/tmp/x.img.xz"),
+    )
+    node, _ = recipe_to_node_config(r)
+    assert node.user_name == "kurt"
+    assert node.user_groups == ["sudo", "docker"]
+    assert node.user_shell == "/bin/bash"
+
+
+def test_no_user_block_falls_back_to_pi_defaults():
+    """Back-compat: recipes without `user:` keep current behavior
+    (raspbian creates the `pi` user). NodeConfig.user_name is the
+    sentinel — empty means 'use backend default'."""
+    r = Recipe(
+        hostname="t", board="pi-5", os="raspbian",
+        ssh_pubkey=_PUBKEY,
+        output=OutputSpec(path="/tmp/x.img.xz"),
+    )
+    node, _ = recipe_to_node_config(r)
+    assert node.user_name == ""
+
+
+def test_user_block_round_trips(tmp_path):
+    from pi_bake.recipe import UserSpec
+    r1 = Recipe(
+        hostname="td", board="pi-5", os="raspbian",
+        ssh_pubkey=_PUBKEY,
+        user=UserSpec(name="kurt", groups=["sudo", "docker"]),
+        output=OutputSpec(path="/tmp/x.img.xz"),
+    )
+    text = dump_recipe(r1)
+    p = tmp_path / "round.yaml"
+    p.write_text(text)
+    r2 = load_recipe(p)
+    assert r2.user is not None
+    assert r2.user.name == r1.user.name
+    assert r2.user.groups == r1.user.groups
+
+
+# --------------------------------------------------------------------------- #
+# dtparam: block (v0.6.0+)                                                     #
+# --------------------------------------------------------------------------- #
+
+def test_dtparam_loads_from_yaml(tmp_path):
+    src = tmp_path / "r.yaml"
+    src.write_text(f'''
+hostname: foo
+board: pi-5
+os: raspbian
+ssh_pubkey: "{_PUBKEY}"
+dtparam:
+  spi: on
+  i2c_arm: on
+output:
+  path: /tmp/x.img.xz
+''')
+    r = load_recipe(src)
+    # YAML's `on` / `off` are auto-coerced to bool; pi-bake
+    # stringifies them to the config.txt convention "on" / "off".
+    assert r.dtparam == {"spi": "on", "i2c_arm": "on"}
+
+
+def test_dtparam_off_normalizes_to_off_string(tmp_path):
+    src = tmp_path / "r.yaml"
+    src.write_text(f'''
+hostname: foo
+board: pi-5
+os: raspbian
+ssh_pubkey: "{_PUBKEY}"
+dtparam:
+  audio: off
+output:
+  path: /tmp/x.img.xz
+''')
+    r = load_recipe(src)
+    assert r.dtparam == {"audio": "off"}
+
+
+def test_dtparam_translates_to_config_txt(tmp_path):
+    """The whole point: each dtparam entry becomes a config.txt
+    `dtparam=<key>=<value>` line in NodeConfig.config_txt,
+    prepended ahead of the operator's explicit lines."""
+    r = Recipe(
+        hostname="t", board="pi-5", os="raspbian",
+        ssh_pubkey=_PUBKEY,
+        dtparam={"spi": "on", "i2c_arm": "on"},
+        config_txt=["dtoverlay=mcp2515-can0,oscillator=16000000"],
+        output=OutputSpec(path="/tmp/x.img.xz"),
+    )
+    node, _ = recipe_to_node_config(r)
+    assert node.config_txt[0] == "dtparam=spi=on"
+    assert node.config_txt[1] == "dtparam=i2c_arm=on"
+    # Operator's explicit lines come AFTER the shortcuts, so they
+    # can override.
+    assert node.config_txt[2] == "dtoverlay=mcp2515-can0,oscillator=16000000"
+
+
+def test_dtparam_invalid_key_rejected(tmp_path):
+    """dtparam keys are alphanum + underscore. Anything with
+    special chars (=, spaces, etc.) is a typo we'd rather catch
+    at bake time than have config.txt silently malformed."""
+    src = tmp_path / "r.yaml"
+    src.write_text(f'''
+hostname: foo
+board: pi-5
+os: raspbian
+ssh_pubkey: "{_PUBKEY}"
+dtparam:
+  "spi=on": true
+output:
+  path: /tmp/x.img.xz
+''')
+    with pytest.raises(ValueError, match="dtparam key"):
+        load_recipe(src)
+
+
+def test_dtparam_round_trips(tmp_path):
+    r1 = Recipe(
+        hostname="td", board="pi-5", os="raspbian",
+        ssh_pubkey=_PUBKEY,
+        dtparam={"spi": "on", "i2c_arm": "on"},
+        output=OutputSpec(path="/tmp/x.img.xz"),
+    )
+    text = dump_recipe(r1)
+    p = tmp_path / "round.yaml"
+    p.write_text(text)
+    r2 = load_recipe(p)
+    assert r2.dtparam == r1.dtparam
+
+
+def test_dtparam_empty_default():
+    r = Recipe(
+        hostname="t", board="pi-5", os="raspbian",
+        ssh_pubkey=_PUBKEY,
+        output=OutputSpec(path="/tmp/x.img.xz"),
+    )
+    assert r.dtparam == {}

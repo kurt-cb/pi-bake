@@ -57,6 +57,21 @@ class NodeConfig:
     wifi_country: str = "US"
     timezone: str = "UTC"
     locale: str = "en_GB.UTF-8"
+    # Operator-named login user. Empty (default) -> the backend's
+    # default convention: Raspbian creates `pi`, Alpine uses
+    # `root`. When set, firstrun.sh creates THIS user with bash
+    # shell + the listed groups + the operator's authorized_keys,
+    # and skips creating Pi OS's default `pi` user entirely. Modern
+    # security practice: well-known default usernames are
+    # attack-targets. Default username is itself a guess vector;
+    # `kurt` or `admin` is less so than `pi`. Raspbian-only for
+    # v0.6.0 — Alpine support deferred.
+    user_name: str = ""
+    user_groups: list[str] = field(default_factory=lambda: [
+        "sudo", "video", "audio", "plugdev", "users", "games",
+        "input", "netdev", "gpio", "i2c", "spi",
+    ])
+    user_shell: str = "/bin/bash"
     extra_pubkeys: list[str] = field(default_factory=list)
     # Optional static IP for eth0. Format "<addr>/<bits>" e.g.
     # "192.168.4.111/24". When set, /etc/network/interfaces uses

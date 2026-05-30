@@ -236,6 +236,13 @@ class _RaspbianBakerBase:
                 raise ValueError(
                     f"{field_name} {value!r} contains shell-unsafe chars"
                 )
+        # User block uses a NodeConfig field validated upstream
+        # by UserSpec.__post_init__ (DNS-label-style username,
+        # alphanum group names, shell path without metachars).
+        # Choose login user: operator-named when set, else pi.
+        login_user = node.user_name or "pi"
+        login_home = f"/home/{login_user}"
+        login_groups = ",".join(node.user_groups)
         return (
             "#!/bin/bash\n"
             "# pi-bake-generated firstrun.sh — runs once via systemd.run=\n"
@@ -270,23 +277,25 @@ class _RaspbianBakerBase:
             f"update-locale 'LANG={node.locale}' 2>/dev/null"
             f" || echo 'LANG={node.locale}' > /etc/default/locale\n"
             "\n"
-            "# pi user: create if missing, then force /bin/bash shell.\n"
-            "# Trixie's userconf-pi defaults to /usr/sbin/nologin; the\n"
-            "# usermod below is the load-bearing fix.\n"
-            "if ! id pi >/dev/null 2>&1; then\n"
-            "  useradd -m -G sudo,video,audio,plugdev,users,games,input"
-            " -s /bin/bash pi\n"
+            f"# Login user: {login_user!r}. create if missing, then\n"
+            f"# force {node.user_shell} shell. (Trixie's userconf-pi\n"
+            "# defaults to /usr/sbin/nologin even for non-pi users\n"
+            "# in some configurations; the explicit usermod below is\n"
+            "# load-bearing.)\n"
+            f"if ! id {login_user} >/dev/null 2>&1; then\n"
+            f"  useradd -m -G {login_groups}"
+            f" -s {node.user_shell} {login_user}\n"
             "fi\n"
-            "usermod -s /bin/bash pi\n"
-            f"echo 'pi:{pi_hash}' | chpasswd -e\n"
+            f"usermod -s {node.user_shell} {login_user}\n"
+            f"echo '{login_user}:{pi_hash}' | chpasswd -e\n"
             "\n"
-            "# Authorized_keys for pi.\n"
-            "install -o pi -g pi -m 700 -d /home/pi/.ssh\n"
-            "cat > /home/pi/.ssh/authorized_keys <<'EOAUTH'\n"
+            f"# Authorized_keys for {login_user}.\n"
+            f"install -o {login_user} -g {login_user} -m 700 -d {login_home}/.ssh\n"
+            f"cat > {login_home}/.ssh/authorized_keys <<'EOAUTH'\n"
             f"{node.authorized_keys_text()}"
             "EOAUTH\n"
-            "chown pi:pi /home/pi/.ssh/authorized_keys\n"
-            "chmod 600 /home/pi/.ssh/authorized_keys\n"
+            f"chown {login_user}:{login_user} {login_home}/.ssh/authorized_keys\n"
+            f"chmod 600 {login_home}/.ssh/authorized_keys\n"
             "\n"
             "# Enable sshd. ssh.service is installed but not enabled by\n"
             "# default on Pi OS Lite.\n"
@@ -366,13 +375,28 @@ class _RaspbianBakerBase:
         # firstrun.sh's self-cleanup also deletes these so
         # userconf-pi doesn't fire on the post-reboot multi-user
         # boot.
-        imgxz.write_file(boot, "ssh", b"", mode=0o644)
-        LOG.info("boot: /ssh marker written (fallback)")
+        #
+        # When the operator has chosen a named user (node.user_name
+        # set), the legacy markers WOULD create a `pi` user the
+        # operator doesn't want — skip them. If firstrun.sh fails
+        # in that case the bake is broken and operator reflashes.
+        if not node.user_name:
+            imgxz.write_file(boot, "ssh", b"", mode=0o644)
+            LOG.info("boot: /ssh marker written (fallback)")
 
-        imgxz.write_file(
-            boot, "userconf.txt", f"pi:{pi_hash}\n", mode=0o600,
-        )
-        LOG.info("boot: /userconf.txt with random locked pi password (fallback)")
+            imgxz.write_file(
+                boot, "userconf.txt", f"pi:{pi_hash}\n", mode=0o600,
+            )
+            LOG.info(
+                "boot: /userconf.txt with random locked pi password "
+                "(fallback)"
+            )
+        else:
+            LOG.info(
+                "boot: skipping /ssh + /userconf.txt fallback markers "
+                "(named user %r; firstrun.sh creates them instead)",
+                node.user_name,
+            )
 
         # wpa_supplicant.conf for wifi. Pi OS Bookworm moved away
         # from this file (NetworkManager is the default now), but

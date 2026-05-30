@@ -151,6 +151,35 @@ def test_firstrun_sh_sets_hostname():
     assert "127.0.1.1" in s
 
 
+def test_firstrun_sh_uses_named_user_when_set():
+    """When NodeConfig.user_name is non-empty, firstrun.sh creates
+    THAT user instead of `pi`. Modern security: well-known default
+    usernames are attack-targets."""
+    n = _node()
+    object.__setattr__(n, "user_name", "kurt")
+    object.__setattr__(n, "user_groups", ["sudo", "docker"])
+    object.__setattr__(n, "user_shell", "/bin/bash")
+    s = _firstrun_sh(n, "$6$abc$hash")
+    # `kurt` user creation + ssh setup
+    assert "useradd -m -G sudo,docker -s /bin/bash kurt" in s
+    assert "usermod -s /bin/bash kurt" in s
+    assert "echo 'kurt:$6$abc$hash' | chpasswd -e" in s
+    assert "install -o kurt -g kurt -m 700 -d /home/kurt/.ssh" in s
+    assert "cat > /home/kurt/.ssh/authorized_keys" in s
+    # No reference to /home/pi anymore.
+    assert "/home/pi" not in s
+
+
+def test_firstrun_sh_falls_back_to_pi_when_no_user_set():
+    """Back-compat: NodeConfig.user_name = '' (default) keeps
+    the v0.5.1 behavior of creating the `pi` user."""
+    n = _node()
+    assert n.user_name == ""
+    s = _firstrun_sh(n, "$6$abc$hash")
+    assert "useradd" in s and " pi\n" in s
+    assert "/home/pi/.ssh/authorized_keys" in s
+
+
 def test_firstrun_sh_sets_timezone():
     """The Raspbian-timezone gap closed in v0.5.1: firstrun.sh
     now writes /etc/timezone + the /etc/localtime symlink from

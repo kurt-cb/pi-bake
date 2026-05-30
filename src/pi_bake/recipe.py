@@ -32,6 +32,7 @@ silently bake with the field ignored.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -49,11 +50,26 @@ except ImportError as e:   # pragma: no cover
 
 _TOP_KEYS = frozenset({
     "hostname", "board", "os", "os_version", "os_mode", "timezone",
-    "locale",
+    "locale", "user", "dtparam",
     "ssh_pubkey", "extra_pubkeys", "ssh_host_key",
     "network", "wifi", "packages", "apk_fetch",
     "config_txt", "modules", "output", "pxe",
 })
+_USER_KEYS = frozenset({"name", "groups", "shell"})
+
+
+def _stringify_dtparam_value(v: object) -> str:
+    """Normalize a YAML scalar to its config.txt form.
+
+    YAML's auto-coercion turns `on` into True and `off` into False;
+    we want them as literal "on"/"off" strings (config.txt
+    convention). Numerics and pre-stringified values pass through.
+    """
+    if v is True:
+        return "on"
+    if v is False:
+        return "off"
+    return str(v)
 _PXE_KEYS = frozenset({"server_url"})
 
 # Valid os_mode values per os. Empty set = mode doesn't apply
@@ -133,6 +149,67 @@ class OutputSpec:
     def __post_init__(self) -> None:
         if not self.path:
             raise ValueError("output.path is required")
+
+
+_VALID_USERNAME = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
+
+
+def _default_user_groups() -> list[str]:
+    return [
+        "sudo", "video", "audio", "plugdev", "users", "games",
+        "input", "netdev", "gpio", "i2c", "spi",
+    ]
+
+
+@dataclass
+class UserSpec:
+    """Operator-named primary login user. Replaces the default
+    `pi` user on Raspbian bakes when set.
+
+    Modern security practice: well-known default usernames are
+    attack targets. A named user (`kurt`, `admin`, `operator`)
+    is less guess-prone than `pi`. firstrun.sh creates the user
+    with `/bin/bash` shell + the listed groups, installs the
+    operator's authorized_keys at /home/<name>/.ssh/, sets a
+    locked random password (key auth only), and does NOT
+    create the `pi` user (Pi OS's userconf.txt + userconf-pi
+    service are pre-empted).
+
+    Currently Raspbian-only. Alpine support deferred — Alpine's
+    convention is root-as-operator, and the apkovl mechanism
+    doesn't have a clean named-user creation hook yet.
+    """
+    name: str
+    # Default groups give the operator-named user the same
+    # capabilities the legacy `pi` user has on Pi OS Lite:
+    # sudo, hardware access (video/audio/i2c/spi/gpio), serial
+    # I/O (dialout), network admin (netdev). Override per
+    # recipe if a tighter set is desired.
+    groups: list[str] = field(default_factory=lambda: [
+        "sudo", "video", "audio", "plugdev", "users", "games",
+        "input", "netdev", "gpio", "i2c", "spi",
+    ])
+    shell: str = "/bin/bash"
+
+    def __post_init__(self) -> None:
+        if not _VALID_USERNAME.match(self.name):
+            raise ValueError(
+                f"user.name {self.name!r} isn't a valid Unix username "
+                f"(lowercase letters / digits / hyphens / underscores, "
+                f"<=32 chars, must start with a letter or underscore)"
+            )
+        for g in self.groups:
+            if not re.match(r"^[a-z_][a-z0-9_-]{0,31}$", g):
+                raise ValueError(
+                    f"user.groups entry {g!r} isn't a valid group name"
+                )
+        # shell path must look like a path — interpolated into
+        # bash + chsh-style flags at first boot. Same paranoia
+        # as elsewhere; refuse shell-metacharacters.
+        if any(c in self.shell for c in "'\"`$\\\n ;|&"):
+            raise ValueError(
+                f"user.shell {self.shell!r} contains shell-unsafe chars"
+            )
 
 
 @dataclass
@@ -266,6 +343,15 @@ class Recipe:
     config_txt: list[str] = field(default_factory=list)
     modules: list[str] = field(default_factory=list)
     pxe: PxeSpec = field(default_factory=PxeSpec)
+    user: UserSpec | None = None
+    # Generic dtparam shortcut. Each (key, value) pair becomes
+    # `dtparam=<key>=<value>` in config.txt, prepended ahead of
+    # operator's explicit `config_txt:` list. Use for the common
+    # hardware-interface toggles disabled-by-default in Pi OS
+    # Bookworm+ (spi, i2c_arm, audio, etc.). For everything that
+    # doesn't fit the dtparam= prefix (enable_uart=1,
+    # dtoverlay=..., gpu_mem=..., etc.) use `config_txt:` directly.
+    dtparam: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         # os_mode validity per os
@@ -380,6 +466,42 @@ def _from_dict(d: dict, *, source: str = "<dict>") -> Recipe:
     _check_keys(pxe_raw, _PXE_KEYS, f"{source}: pxe")
     pxe = PxeSpec(**pxe_raw)
 
+    dtparam_raw = d.get("dtparam") or {}
+    if not isinstance(dtparam_raw, dict):
+        raise ValueError(
+            f"{source}: `dtparam` must be a mapping (key: value), "
+            f"got {type(dtparam_raw).__name__}"
+        )
+    dtparam = {
+        str(k): _stringify_dtparam_value(v) for k, v in dtparam_raw.items()
+    }
+    # Sanity-check: keys should be alphanum + underscore + dash.
+    # Anything weirder is probably a typo; refuse at bake time.
+    for k in dtparam:
+        if not re.match(r"^[a-zA-Z0-9_]+$", k):
+            raise ValueError(
+                f"{source}: dtparam key {k!r} should be alphanumeric "
+                f"+ underscore; got special characters"
+            )
+
+    user_raw = d.get("user")
+    user: UserSpec | None = None
+    if user_raw is not None:
+        if not isinstance(user_raw, dict):
+            raise ValueError(
+                f"{source}: `user` must be a mapping, "
+                f"got {type(user_raw).__name__}"
+            )
+        _check_keys(user_raw, _USER_KEYS, f"{source}: user")
+        if "name" not in user_raw:
+            raise ValueError(f"{source}: user.name is required")
+        user_kwargs: dict = {"name": user_raw["name"]}
+        if "groups" in user_raw:
+            user_kwargs["groups"] = list(user_raw["groups"])
+        if "shell" in user_raw:
+            user_kwargs["shell"] = user_raw["shell"]
+        user = UserSpec(**user_kwargs)
+
     extra_pubkeys = d.get("extra_pubkeys") or []
     if not isinstance(extra_pubkeys, list):
         raise ValueError(
@@ -441,6 +563,8 @@ def _from_dict(d: dict, *, source: str = "<dict>") -> Recipe:
         config_txt=list(config_txt),
         modules=list(modules),
         pxe=pxe,
+        user=user,
+        dtparam=dtparam,
     )
 
 
@@ -528,6 +652,26 @@ def dump_recipe(r: Recipe) -> str:
         lines.append("# PXE-mode lab HTTP base URL (apkovl + alpine_repo target).")
         lines.append("pxe:")
         lines.append(f"  server_url: {_yaml_str(r.pxe.server_url)}")
+    if r.dtparam:
+        lines.append("")
+        lines.append("# dtparam shortcuts — each becomes `dtparam=<key>=<value>` in config.txt.")
+        lines.append("dtparam:")
+        for k, v in r.dtparam.items():
+            lines.append(f"  {k}: {v}")
+    if r.user is not None:
+        lines.append("")
+        lines.append("# Operator-named primary login user (replaces default `pi` on Raspbian).")
+        lines.append("user:")
+        lines.append(f"  name: {_yaml_str(r.user.name)}")
+        # Only emit groups/shell if they differ from defaults — keeps
+        # round-tripped recipes minimal.
+        default = UserSpec(name=r.user.name)
+        if list(r.user.groups) != list(default.groups):
+            lines.append("  groups:")
+            for g in r.user.groups:
+                lines.append(f"    - {_yaml_str(g)}")
+        if r.user.shell != default.shell:
+            lines.append(f"  shell: {_yaml_str(r.user.shell)}")
     lines.append("")
     lines.append("# Where the baked artifact lands (file for img bakes, dir for pxe)")
     lines.append("output:")
@@ -594,12 +738,18 @@ def recipe_to_node_config(r: Recipe):
         wifi_country=r.wifi.country if r.wifi else "US",
         timezone=r.timezone,
         locale=r.locale,
+        config_txt=(
+            [f"dtparam={k}={v}" for k, v in r.dtparam.items()]
+            + list(r.config_txt)
+        ),
+        user_name=(r.user.name if r.user else ""),
+        user_groups=(list(r.user.groups) if r.user else _default_user_groups()),
+        user_shell=(r.user.shell if r.user else "/bin/bash"),
         static_ipv4=r.network.address if r.network.mode == "static" else "",
         gateway_ipv4=r.network.gateway if r.network.mode == "static" else "",
         dhcp_send_hostname=r.network.send_hostname,
         ssh_host_key_priv=priv_bytes,
         ssh_host_key_pub=pub_bytes,
-        config_txt=list(r.config_txt),
         modules=list(r.modules),
         board=r.board,
     )
