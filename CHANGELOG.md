@@ -5,6 +5,59 @@ tags via `./scripts/release-notes.sh`. To add notes for
 a new release, tag the commit with
 `git tag -a vX.Y.Z -m "..."` and re-run this script.
 
+## v0.6.1 — 2026-05-30
+
+`user:` (v0.6.0) was a single block — one operator-named login
+account, using the top-level ssh_pubkey. v0.6.1 adds `users:`
+(plural) for multi-account labs + service accounts:
+
+  users:
+    - name: alice
+      groups: [sudo, docker]
+      ssh_pubkey: ~/.ssh/alice-laptop.pub
+    - name: bob
+      groups: [users, video]
+      # no ssh_pubkey -> inherits top-level ssh_pubkey
+    - name: monitoring
+      shell: /usr/sbin/nologin
+      ssh_pubkey: monitoring-bot.pub
+
+Key resolution rules:
+
+  - Per-user `ssh_pubkey:` REPLACES the top-level set for that
+    user. Useful when alice + bob have different laptop keys.
+  - Per-user `extra_pubkeys:` (without per-user ssh_pubkey)
+    COMPOSE on top of the top-level set — additive.
+  - Top-level ssh_pubkey ALWAYS lands at /root/.ssh/ as the
+    recovery hatch.
+
+`user:` (singular) and `users:` (plural) are mutually exclusive
+at YAML load time. Internally both populate one canonical list.
+Single-user recipes round-trip as `user:`; multi-user or
+single-user-with-per-user-key recipes use the plural form.
+
+Validation:
+
+  - Empty `users: []` rejected (operator confusion — omit the
+    block for default).
+  - Duplicate user names rejected.
+  - Both `user:` and `users:` set rejected.
+  - All UserSpec validation applies per-user.
+
+== Breaking change for direct NodeConfig API users ==
+
+NodeConfig replaces `user_name` / `user_groups` / `user_shell`
+with `users: list[UserConfig]` (UserConfig is the resolved
+form with authorized_keys already merged). v0.6.0 was 1 day
+old at release, so the compat-debt cost is minimal. YAML-recipe
+users see no change.
+
+== Tests ==
+
+284 passed, 1 skipped. 9 new tests cover users: plural +
+per-user keys + composition rules + the mutually-exclusive
+validation.
+
 ## v0.6.0 — 2026-05-30
 
 Two operator-quality-of-life additions; two new ROADMAP items
