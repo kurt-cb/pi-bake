@@ -1221,6 +1221,23 @@ raspbian_pxe.py must bake the following into the rootfs:
   - `udisks2.service` — graphical-target leftover; not needed
     on Lite NFS-root
 
+Also: ssh on Bookworm is **socket-activated** — must enable
+`ssh.socket` (in `/etc/systemd/system/sockets.target.wants/`)
+not just `ssh.service`. The service alone won't start if
+nothing pokes the socket.
+
+Also: delete `/etc/ssh/sshd_config.d/rename_user.conf` — it
+references `/usr/share/userconf-pi/sshd_banner` which our
+mask of userconf-pi may break. sshd refuses to start when
+Banner points at missing file.
+
+Also: persistent journal needs **BOTH**
+`/var/log/journal/` directory present **AND**
+`/etc/systemd/journald.conf.d/persistent.conf` with
+`[Journal]\nStorage=persistent`. Directory alone isn't
+enough on Bookworm. Required so the next boot's failures are
+diagnosable from the NFS server side.
+
 Also:
 
   - **`default.target` symlink override** to

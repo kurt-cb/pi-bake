@@ -77,3 +77,27 @@ tested:
       wgets apkovl + signed apks over HTTP, switch_root + openrc
       starts networking + sshd + dhcpcd + chronyd, system
       reachable as hostname smoke-pxe.
+
+  # Raspbian PXE NFS-root — NOT a current pi-bake feature; this
+  # row marks the v0.7.0 raspbian_pxe.py spec validation, NOT a
+  # reproducible bake. The bake was hand-assembled from pi-bake's
+  # standard Raspbian .img.xz + the conversion+fixes documented in
+  # ROADMAP #27 (v0.7.0 design spec). Once raspbian_pxe.py ships,
+  # this entry can be re-flagged as `version: stable` etc.
+  - board: pi-cm4
+    os: raspbian
+    os_mode: pxe-design-validation
+    version: 2025-05-13
+    tested_on: 2026-05-30
+    tested_by: kurtgo
+    recipe: ROADMAP.md#27
+    notes: |
+      CM4 (88:a2:9e:44:31:f3) PXE-boots Pi OS Bookworm via
+      TFTP kernel + NFS-root mount from unfs3 in unprivileged
+      LXC container. Clean single boot, no reboot loops, no
+      manual post-boot surgery. Validates the full v0.7.0
+      raspbian_pxe.py spec: service-mask list, config.txt
+      strip, fstab PARTUUID strip, ssh.socket activation,
+      getty@tty1 enable, default.target = multi-user, pre-baked
+      SSH host keys, hostname baked direct (no firstrun.sh).
+      Deployment used A/B-NFS slots (cm4-pxe-a / cm4-pxe-b).
