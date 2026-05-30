@@ -1175,6 +1175,108 @@ Same lab setup as Alpine PXE (CM4 with EEPROM netboot
 priority) plus an NFS server somewhere reachable. Add a row
 to `tested_bakes.yaml` once a fresh bake boots end-to-end.
 
+### A/B NFS export scheme (for redeploys)
+
+End-to-end live testing 2026-05-30 surfaced a footgun: modifying
+the NFS export tree while the Pi is actively using it causes
+stale file handle errors that may panic the kernel. The
+analogue of A/B partitioning on SD (ROADMAP #17) for NFS is:
+
+```
+/srv/nfs/pi-bake/<host>-a/   ← currently mounted (read-only-ish)
+/srv/nfs/pi-bake/<host>-b/   ← prepare new bake here
+/srv/nfs/pi-bake/<host>/     ← symlink, atomically swapped at deploy
+```
+
+On next reboot, the symlink-swap takes effect; the formerly-
+active slot becomes inactive and safely modifiable for the
+next bake. Pi-bake's deploy helper would do `incus exec
+nfs-pi-bake -- swap-slots <host>` rather than direct rsync into
+the active dir. v0.7.0 raspbian_pxe.py should implement this
+from the start.
+
+### Service-mask list (what Pi OS needs disabled for NFS-root)
+
+Empirically verified on a CM4 hardware boot 2026-05-30. v0.7.0
+raspbian_pxe.py must bake the following into the rootfs:
+
+  - `regenerate_ssh_host_keys.service` — would wipe pre-baked
+    keys on first boot
+  - `init_resize2fs_once.service` — tries to resize a partition
+    that doesn't exist
+  - `NetworkManager.service` + `NetworkManager-wait-online.service`
+    — would fight kernel's `ip=dhcp` over eth0 and break NFS
+    mount
+  - `dhcpcd.service` — same conflict reason
+  - `dphys-swapfile.service` — tries to create swap file on
+    slow NFS-mounted /
+  - `rpi-eeprom-update.service` — does firmware-mailbox probes
+    that fail in early boot
+  - `userconfig.service` — interactive first-boot wizard;
+    prompts for new username on tty1 and stalls boot
+  - `userconf-pi.service` (if present) — silent variant of the
+    same
+  - `sshswitch.service` — Pi OS wrapper for ssh.service;
+    redundant when ssh.service is enabled directly
+  - `udisks2.service` — graphical-target leftover; not needed
+    on Lite NFS-root
+
+Also:
+
+  - **`default.target` symlink override** to
+    `/lib/systemd/system/multi-user.target` — Pi OS Lite
+    Bookworm defaults to graphical.target which pulls in
+    udisks2 + other unneeded services
+  - **Pre-generate SSH host keys** via `ssh-keygen -A` (since
+    regenerate service is masked)
+  - **Enable `getty@tty1.service`** — Pi OS Lite has it
+    disabled by default (the userconfig autologin was supposed
+    to take its slot)
+  - **Pre-create `/var/log/journal/`** — turn on persistent
+    journal so future boot failures are diagnosable from the
+    server side
+
+### config.txt strip
+
+Stock Pi OS config.txt enables GPU / camera / display
+auto-detect which triggers Pi-firmware-mailbox property calls
+that fail or hang on a netbooting CM4. v0.7.0 raspbian_pxe.py
+should overwrite config.txt with bare minimum:
+
+```
+arm_64bit=1
+auto_initramfs=0
+enable_uart=1
+```
+
+### cmdline.txt template
+
+Stripped of `init=`, `root=PARTUUID=`, `rootfstype=ext4`,
+`quiet`. Has `ip=dhcp root=/dev/nfs nfsroot=<recipe-nfs_server>`
+with mount options matching the NFS server (`vers=3,proto=tcp,
+port=<nfs_port>,mountport=<mountd_port>,nolock` when going
+through incus proxy on custom ports).
+
+### Customization model (firstrun.sh vs direct)
+
+The firstrun.sh approach (used for SD bakes since v0.4) is
+**not viable for NFS-root** because:
+
+- firstrun.sh's self-cleanup deletes `/boot/firmware/firstrun.sh`
+  from the NFS-rootfs after first boot ✓
+- but it CAN'T edit the **TFTP-served cmdline.txt** (a separate
+  file on the lab host's TFTP root)
+- result: every subsequent boot re-triggers
+  `systemd.run=…firstrun.sh` which now doesn't exist → unit
+  creation fails → `systemd.run_failure_action=poweroff` →
+  CM4 powers off in a loop
+
+For NFS-root, customization (hostname, user, SSH keys, etc.)
+must be baked **directly into the rootfs at bake time** —
+modify `/etc/passwd` / `/etc/shadow` / `/etc/hostname` /
+`/home/<user>/.ssh/authorized_keys` in place. No first-boot
+script needed.
+
 See `src/pi_bake/alpine_pxe.py` for the parallel TFTP-tree
 structure to mirror.
 

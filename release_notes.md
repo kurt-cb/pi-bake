@@ -19,6 +19,8 @@ for the tag-time checklist.
 
 | Version | Date | Headline |
 |---|---|---|
+| [v0.6.2](#v062--2026-05-30--cm-board-catalog--example-cleanup--raspbian-bugfixes) | 2026-05-30 | pi-cm3/cm4/cm5 catalog entries + example hostname cleanup + raspbian.py bugfixes from v0.6.1 |
+| [v0.6.1](#v061--2026-05-29--multi-user-with-per-user-key-fallback) | 2026-05-29 | Multi-user via `users:` plural with per-user ssh_pubkey fallback to top-level |
 | [v0.6.0](#v060--2026-05-29--named-user--dtparam-shortcuts) | 2026-05-29 | Named user replaces default `pi` + generic `dtparam:` config.txt shortcuts |
 | [v0.5.1](#v051--2026-05-29--locale--timezone-for-raspbian--sample-cleanup) | 2026-05-29 | Raspbian timezone gap fixed + `locale:` field + ssh_pubkey glob + sample cleanup |
 | [v0.5.0](#v050--2026-05-29--per-codename-raspbian-bakers) | 2026-05-29 | Raspbian backend split into per-codename baker classes (Bookworm + Trixie) with chronology-aware UNTESTED-fallback dispatch + per-codename example recipes |
@@ -41,6 +43,49 @@ for the tag-time checklist.
 | [v0.0.1](#v001--2026-05-23--first-real-hardware-shape) | 2026-05-23 | Static IP + time sync + WiFi firmware + RTC-less boot survival |
 
 ---
+
+## v0.6.2 — 2026-05-30 — CM board catalog + example cleanup + raspbian bugfixes
+
+Patch release driven by hands-on Raspbian PXE NFS-root validation on a
+real CM4 lab device. Three small but real items:
+
+- **CM3/CM4/CM5 catalog entries** ([ROADMAP #24+](ROADMAP.md))
+  — Compute Module variants now have their own `pi-cm3` /
+  `pi-cm4` / `pi-cm5` catalog entries instead of being coerced
+  into `pi-3` / `pi-4` / `pi-5`. They share the same SoC + Pi OS
+  image as their consumer-Pi family member; distinct entries are
+  for catalog clarity (operators pick what they actually have).
+  Updated `supports_boards` on Alpine / Raspbian / Debian /
+  Fedora to include the CM variants appropriately.
+
+- **Example hostnames cleaned of project leak** — recipes
+  previously used `td-pi5-1`, `td-cm4` etc.; the `td-` prefix
+  was leftover from operator's totaldns project. Renamed to
+  generic board+purpose names (`pi5-wired`, `cm4-lab`,
+  `pi5-bookworm`, etc.) — same pattern as the v0.5.1 `ssh_pubkey`
+  glob cleanup. Examples should describe the board + use case,
+  not anyone's specific deployment.
+
+- **Two raspbian.py bugfixes leftover from v0.6.1 refactor**
+  — caught while doing live bakes in the privileged pi-bake LXC
+  container:
+  1. `user_name` → `users` (list) in the legacy fallback-markers
+     guard. Missed in the v0.6.1 multi-user refactor; raspbian
+     bakes crashed with `AttributeError` when run without an
+     operator user block.
+  2. Direct `unlink` (not `sudo rm -f`) when already euid 0.
+     Pi-bake's privileged-LXC bake environment runs as root
+     without sudo installed; the bake threw `"[Errno 2] No such
+     file or directory: 'sudo'"` trying to remove the userconfig
+     autologin override.
+
+## v0.6.1 — 2026-05-29 — multi-user with per-user key fallback
+
+`user:` (v0.6.0) was a single block — one operator-named login
+account. v0.6.1 adds `users:` (plural) for multi-account labs +
+service accounts, with optional per-user `ssh_pubkey:` overrides
+that fall back to the top-level key. Mutually exclusive with
+`user:` (singular).
 
 ## v0.6.0 — 2026-05-29 — named user + `dtparam:` shortcuts
 
