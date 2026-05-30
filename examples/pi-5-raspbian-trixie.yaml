@@ -30,7 +30,14 @@ board: pi-5
 os: raspbian
 os_version: latest      # -> Pi OS's permanent-redirect (Trixie today)
 
-ssh_pubkey: ~/.ssh/totaldns-adhoc.pub
+# Locale + timezone. Pi OS Lite ships en_GB.UTF-8 + UTC by
+# default. Override here for US English + US/Eastern. firstrun.sh
+# writes /etc/timezone + /etc/localtime + /etc/default/locale and
+# runs locale-gen on first boot.
+timezone: America/New_York
+locale: en_US.UTF-8
+
+ssh_pubkey: ~/.ssh/*.pub
 
 # Stable per-host SSH identity. `usehost` derives ed25519
 # deterministically from the hostname — same hostname → same
@@ -43,4 +50,4 @@ network:
   send_hostname: true
 
 output:
-  path: ~/sdcards/td-pi5-trixie.img.xz
+  path: td-pi5-trixie.img.xz

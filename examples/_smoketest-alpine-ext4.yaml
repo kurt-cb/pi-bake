@@ -16,4 +16,4 @@ network:
   send_hostname: true
 
 output:
-  path: ~/sdcards/smoketest.img.xz
+  path: smoketest.img.xz

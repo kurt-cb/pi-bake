@@ -23,11 +23,11 @@ os: raspbian
 # os_version: latest (default; permanent-latest redirect — currently
 # bookworm as of 2026-05)
 
-ssh_pubkey: ~/.ssh/totaldns-adhoc.pub
+ssh_pubkey: ~/.ssh/*.pub
 
 network:
   mode: dhcp
   send_hostname: true
 
 output:
-  path: ~/sdcards/td-cm4-raspbian.img.xz
+  path: td-cm4-raspbian.img.xz

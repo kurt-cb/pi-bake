@@ -34,7 +34,7 @@ os_mode: ext4
 # specifically need edge.
 os_version: edge
 
-ssh_pubkey: ~/.ssh/totaldns-adhoc.pub
+ssh_pubkey: ~/.ssh/*.pub
 
 network:
   mode: dhcp
@@ -50,6 +50,6 @@ packages:
   - py3-pydbus
 
 output:
-  path: ~/sdcards/td-pi5-ext4.img.xz
+  path: td-pi5-ext4.img.xz
   # ext4 default is 2048 MB; bump if you need a larger root partition.
   image_size_mb: 2048

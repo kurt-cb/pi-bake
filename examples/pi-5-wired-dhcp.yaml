@@ -14,7 +14,7 @@ hostname: td-pi5-1
 board: pi-5
 os: alpine
 
-ssh_pubkey: ~/.ssh/totaldns-adhoc.pub
+ssh_pubkey: ~/.ssh/*.pub
 
 network:
   mode: dhcp
@@ -27,4 +27,4 @@ packages:
   - py3-pydbus
 
 output:
-  path: ~/sdcards/td-pi5-1.img.gz
+  path: td-pi5-1.img.gz

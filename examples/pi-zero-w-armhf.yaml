@@ -8,7 +8,7 @@ hostname: td-pi0w-1
 board: pi-zero-w
 os: alpine
 
-ssh_pubkey: ~/.ssh/totaldns-adhoc.pub
+ssh_pubkey: ~/.ssh/*.pub
 
 network:
   mode: dhcp
@@ -20,4 +20,4 @@ wifi:
   country: US
 
 output:
-  path: ~/sdcards/td-pi0w-1.img.gz
+  path: td-pi0w-1.img.gz

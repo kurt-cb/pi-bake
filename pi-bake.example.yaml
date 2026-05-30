@@ -35,11 +35,11 @@ os: alpine
 # Becomes /root/.ssh/authorized_keys (Alpine) with PasswordAuthentication
 # disabled in sshd_config. Password login OFF by default — only key
 # auth works.
-ssh_pubkey: ~/.ssh/totaldns-adhoc.pub
+ssh_pubkey: ~/.ssh/*.pub
 
 # Where the .img.gz lands. Operator dd's this to the SD card.
 output:
-  path: ~/sdcards/td-pi5-1.img.gz
+  path: td-pi5-1.img.gz
   # Optional. 0 / omitted → backend default (400 MB for Alpine).
   # Bump if you bake huge package sets that don't fit.
   # image_size_mb: 800
@@ -81,8 +81,17 @@ output:
 
 # IANA timezone. Default UTC. Some clocks (Pi has no RTC) come up
 # at 1970-01-01 anyway until chrony syncs — this is only the
-# permanent setting for /etc/timezone.
+# permanent setting for /etc/timezone + /etc/localtime symlink.
 # timezone: America/New_York
+
+# glibc locale, e.g. `en_US.UTF-8`, `de_DE.UTF-8`, `ja_JP.UTF-8`.
+# Default `en_GB.UTF-8` — matches Pi OS Lite's shipped default, no
+# surprise change. Only the encoding (UTF-8) matters for most CLI
+# work; the en_US vs en_GB choice is cosmetic unless you care
+# about date formats / number separators / etc. On first boot
+# pi-bake's firstrun.sh uncomments the locale in /etc/locale.gen,
+# runs locale-gen to compile it, and sets LANG via update-locale.
+# locale: en_US.UTF-8
 
 # Additional authorized_keys entries beyond ssh_pubkey above. Same
 # three-form resolution (path / inline / bare filename).

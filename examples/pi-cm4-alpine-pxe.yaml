@@ -35,7 +35,7 @@ os: alpine
 os_mode: pxe
 os_version: 3.21.4
 
-ssh_pubkey: ~/.ssh/totaldns-adhoc.pub
+ssh_pubkey: ~/.ssh/*.pub
 
 pxe:
   # Base HTTP URL nginx serves the baked tree at on the lab host.

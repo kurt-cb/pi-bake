@@ -34,7 +34,15 @@ board: pi-5
 os: raspbian
 os_version: stable      # -> 2025-05-13 Bookworm
 
-ssh_pubkey: ~/.ssh/totaldns-adhoc.pub
+# Locale + timezone. Pi OS Lite ships en_GB.UTF-8 + UTC by
+# default. Override here for US English + US/Eastern. firstrun.sh
+# writes /etc/timezone + /etc/localtime + /etc/default/locale and
+# runs locale-gen on first boot (the locale isn't pre-generated
+# unless it matches Pi OS's shipped default).
+timezone: America/New_York
+locale: en_US.UTF-8
+
+ssh_pubkey: ~/.ssh/*.pub
 
 # Stable per-host SSH identity. `usehost` derives ed25519
 # deterministically from the hostname — same hostname → same
@@ -47,4 +55,4 @@ network:
   send_hostname: true
 
 output:
-  path: ~/sdcards/td-pi5-bookworm.img.xz
+  path: td-pi5-bookworm.img.xz

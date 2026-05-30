@@ -22,7 +22,7 @@ board: pi-5
 os: alpine
 os_version: 3.21.4
 
-ssh_pubkey: ~/.ssh/totaldns-adhoc.pub
+ssh_pubkey: ~/.ssh/*.pub
 
 network:
   mode: dhcp
@@ -51,4 +51,4 @@ packages:
   - can-utils
 
 output:
-  path: ~/sdcards/can-pi.img.gz
+  path: can-pi.img.gz
