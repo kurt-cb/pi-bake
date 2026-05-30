@@ -37,6 +37,15 @@ class NodeConfig:
       - wifi_country: regulatory domain ("US", "GB", etc.). Defaults
                      to "US". Needed for 5 GHz channel unlock.
       - timezone:    e.g. "America/New_York". Defaults to "UTC".
+                     Backends write `/etc/timezone` + symlink
+                     `/etc/localtime` to /usr/share/zoneinfo/<tz>.
+      - locale:      e.g. "en_US.UTF-8". Defaults to "en_GB.UTF-8"
+                     (matches Pi OS Lite's shipped default, no
+                     surprise change). Backends ensure the locale
+                     is generated + set as LANG. Only the encoding
+                     part (UTF-8) matters for most CLI work; the
+                     en_US vs en_GB choice is mostly cosmetic
+                     unless you care about date formats / etc.
       - extra_pubkeys: additional authorized_keys entries beyond the
                      primary pubkey (useful for shared deployments).
     """
@@ -47,6 +56,7 @@ class NodeConfig:
     wifi_psk: str = ""
     wifi_country: str = "US"
     timezone: str = "UTC"
+    locale: str = "en_GB.UTF-8"
     extra_pubkeys: list[str] = field(default_factory=list)
     # Optional static IP for eth0. Format "<addr>/<bits>" e.g.
     # "192.168.4.111/24". When set, /etc/network/interfaces uses

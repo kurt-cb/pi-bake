@@ -727,3 +727,103 @@ def test_pxe_round_trip(tmp_path):
     p.write_text(dump_recipe(r1))
     r2 = load_recipe(p)
     assert r2 == r1
+
+
+# --------------------------------------------------------------------------- #
+# locale field (v0.5.1+)                                                       #
+# --------------------------------------------------------------------------- #
+
+def test_locale_defaults_to_en_gb_utf8():
+    """No surprise change — Pi OS Lite's shipped default."""
+    r = Recipe(
+        hostname="t", board="pi-5", os="alpine",
+        ssh_pubkey=_PUBKEY,
+        output=OutputSpec(path="/tmp/x.img.gz"),
+    )
+    assert r.locale == "en_GB.UTF-8"
+
+
+def test_locale_loads_from_yaml(tmp_path):
+    src = tmp_path / "r.yaml"
+    src.write_text(f'''
+hostname: foo
+board: pi-5
+os: alpine
+ssh_pubkey: "{_PUBKEY}"
+locale: en_US.UTF-8
+output:
+  path: /tmp/x.img.gz
+''')
+    r = load_recipe(src)
+    assert r.locale == "en_US.UTF-8"
+
+
+def test_locale_round_trips(tmp_path):
+    r1 = Recipe(
+        hostname="t", board="pi-5", os="alpine",
+        ssh_pubkey=_PUBKEY,
+        locale="ja_JP.UTF-8",
+        output=OutputSpec(path="/tmp/x.img.gz"),
+    )
+    p = tmp_path / "r.yaml"
+    p.write_text(dump_recipe(r1))
+    r2 = load_recipe(p)
+    assert r2.locale == "ja_JP.UTF-8"
+
+
+def test_locale_threaded_to_node_config():
+    r = Recipe(
+        hostname="t", board="pi-5", os="alpine",
+        ssh_pubkey=_PUBKEY,
+        locale="en_US.UTF-8",
+        output=OutputSpec(path="/tmp/x.img.gz"),
+    )
+    node, _ = recipe_to_node_config(r)
+    assert node.locale == "en_US.UTF-8"
+
+
+# --------------------------------------------------------------------------- #
+# ssh_pubkey glob support (v0.5.1+)                                            #
+# --------------------------------------------------------------------------- #
+
+def test_ssh_pubkey_glob_expands_to_all_matches(tmp_path):
+    """`~/.ssh/*.pub` style globs scoop up every key the operator
+    has on the bake host without naming them individually. Useful
+    for the common case where the operator wants their personal
+    set of keys (laptop + yubikey + etc.) trusted on every bake."""
+    (tmp_path / "a.pub").write_text("ssh-ed25519 AAAA-FIRST op-a\n")
+    (tmp_path / "b.pub").write_text("ssh-ed25519 AAAA-SECOND op-b\n")
+    from pi_bake.recipe import _resolve_pubkey
+    out = _resolve_pubkey(str(tmp_path / "*.pub"))
+    assert "AAAA-FIRST" in out
+    assert "AAAA-SECOND" in out
+    # Multi-line, ready to drop into authorized_keys verbatim.
+    assert out.count("\n") == 1  # 2 keys -> 1 newline between them
+
+
+def test_ssh_pubkey_glob_matches_none_raises(tmp_path):
+    from pi_bake.recipe import _resolve_pubkey
+    with pytest.raises(ValueError, match="matched no files"):
+        _resolve_pubkey(str(tmp_path / "*.pub"))
+
+
+def test_ssh_pubkey_glob_results_are_sorted(tmp_path):
+    """Sorted output -> deterministic across bake hosts. An
+    operator running the same recipe on two laptops should get
+    byte-identical authorized_keys."""
+    (tmp_path / "z.pub").write_text("ssh-ed25519 AAAA-Z opZ\n")
+    (tmp_path / "a.pub").write_text("ssh-ed25519 AAAA-A opA\n")
+    from pi_bake.recipe import _resolve_pubkey
+    out = _resolve_pubkey(str(tmp_path / "*.pub"))
+    # a.pub comes before z.pub alphabetically -> AAAA-A first
+    assert out.index("AAAA-A") < out.index("AAAA-Z")
+
+
+def test_ssh_pubkey_path_without_glob_chars_unchanged(tmp_path):
+    """Glob handling is keyed off `*`, `?`, `[`. A plain path
+    keeps the v0.0+ behavior — read the single file."""
+    p = tmp_path / "id_ed25519.pub"
+    p.write_text("ssh-ed25519 AAAA-SINGLE op@host\n")
+    from pi_bake.recipe import _resolve_pubkey
+    out = _resolve_pubkey(str(p))
+    assert out == "ssh-ed25519 AAAA-SINGLE op@host"

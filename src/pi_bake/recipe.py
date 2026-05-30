@@ -49,6 +49,7 @@ except ImportError as e:   # pragma: no cover
 
 _TOP_KEYS = frozenset({
     "hostname", "board", "os", "os_version", "os_mode", "timezone",
+    "locale",
     "ssh_pubkey", "extra_pubkeys", "ssh_host_key",
     "network", "wifi", "packages", "apk_fetch",
     "config_txt", "modules", "output", "pxe",
@@ -255,6 +256,7 @@ class Recipe:
     os_version: str = ""
     os_mode: str = ""
     timezone: str = "UTC"
+    locale: str = "en_GB.UTF-8"
     extra_pubkeys: list[str] = field(default_factory=list)
     network: NetworkSpec = field(default_factory=NetworkSpec)
     wifi: WifiSpec | None = None
@@ -429,6 +431,7 @@ def _from_dict(d: dict, *, source: str = "<dict>") -> Recipe:
         os_version=d.get("os_version") or "",
         os_mode=d.get("os_mode") or "",
         timezone=d.get("timezone") or "UTC",
+        locale=d.get("locale") or "en_GB.UTF-8",
         extra_pubkeys=[str(k) for k in extra_pubkeys],
         network=network,
         wifi=wifi,
@@ -468,6 +471,8 @@ def dump_recipe(r: Recipe) -> str:
         lines.append(f"os_mode: {_yaml_str(r.os_mode)}")
     if r.timezone and r.timezone != "UTC":
         lines.append(f"timezone: {_yaml_str(r.timezone)}")
+    if r.locale and r.locale != "en_GB.UTF-8":
+        lines.append(f"locale: {_yaml_str(r.locale)}")
     lines.append("")
     lines.append("# Primary OpenSSH pubkey (path on the bake host OR inline string)")
     lines.append(f"ssh_pubkey: {_yaml_str(r.ssh_pubkey)}")
@@ -588,6 +593,7 @@ def recipe_to_node_config(r: Recipe):
         wifi_psk=r.wifi.psk if r.wifi else "",
         wifi_country=r.wifi.country if r.wifi else "US",
         timezone=r.timezone,
+        locale=r.locale,
         static_ipv4=r.network.address if r.network.mode == "static" else "",
         gateway_ipv4=r.network.gateway if r.network.mode == "static" else "",
         dhcp_send_hostname=r.network.send_hostname,
@@ -618,19 +624,42 @@ def recipe_to_node_config(r: Recipe):
 
 
 def _resolve_pubkey(s: str) -> str:
-    """Read a pubkey from a path, or pass through a literal pubkey.
+    """Read a pubkey from a path, expand a glob to multiple keys,
+    or pass through a literal pubkey.
 
-    Heuristic: any of (a) starts with `~`, (b) starts with `/`,
-    (c) starts with `./` is treated as a file path. Strings starting
-    with an OpenSSH key prefix (ssh-rsa, ssh-ed25519, ecdsa-) are
-    passed through verbatim. Everything else: try to read as a file;
-    if it doesn't exist, error with both possibilities flagged.
+    Heuristic for paths: any of (a) starts with `~`, (b) starts
+    with `/`, (c) starts with `./` is treated as a file path.
+    Strings starting with an OpenSSH key prefix (ssh-rsa,
+    ssh-ed25519, ecdsa-) are passed through verbatim. Everything
+    else: try to read as a file; if it doesn't exist, error with
+    both possibilities flagged.
+
+    Glob support (v0.5.1+): if the path contains `*`, `?`, or
+    `[`, it's expanded via `glob.glob()`. All matched files are
+    read and their contents joined with newlines, producing a
+    multi-line authorized_keys-ready string. Useful for
+    `~/.ssh/*.pub` which scoops up every key the operator has on
+    the bake host without naming them individually. Errors loudly
+    if the glob matches zero files.
     """
+    import glob as _glob
+
     s = s.strip()
     if s.startswith(("ssh-rsa", "ssh-ed25519", "ecdsa-sha2-")):
         return s
     if s.startswith(("~", "/", "./")):
-        return Path(s).expanduser().read_text().strip()
+        expanded = str(Path(s).expanduser())
+        if any(c in s for c in "*?["):
+            matches = sorted(_glob.glob(expanded))
+            if not matches:
+                raise ValueError(
+                    f"ssh_pubkey glob {s!r} matched no files "
+                    f"(expanded: {expanded!r})"
+                )
+            return "\n".join(
+                Path(m).read_text().strip() for m in matches
+            )
+        return Path(expanded).read_text().strip()
     # Ambiguous: try as file, fall through to verbatim if reading fails.
     p = Path(s).expanduser()
     if p.is_file():
@@ -638,8 +667,8 @@ def _resolve_pubkey(s: str) -> str:
     raise ValueError(
         f"ssh_pubkey value {s!r} doesn't look like an OpenSSH key "
         f"(no ssh-rsa/ssh-ed25519/ecdsa- prefix) and isn't a readable "
-        f"file path. Provide either an inline key string or a path "
-        f"starting with ~, /, or ./"
+        f"file path. Provide either an inline key string, a path "
+        f"starting with ~, /, or ./, or a glob like ~/.ssh/*.pub"
     )
 
 
