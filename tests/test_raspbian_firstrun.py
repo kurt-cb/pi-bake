@@ -151,6 +151,52 @@ def test_firstrun_sh_sets_hostname():
     assert "127.0.1.1" in s
 
 
+def test_firstrun_sh_sets_timezone():
+    """The Raspbian-timezone gap closed in v0.5.1: firstrun.sh
+    now writes /etc/timezone + the /etc/localtime symlink from
+    NodeConfig.timezone. Latent gap since v0.2 — schema accepted
+    the field but Raspbian dropped the value."""
+    s = _firstrun_sh(
+        _node(timezone="America/New_York"), "$6$abc$hash",
+    )
+    assert "echo 'America/New_York' > /etc/timezone" in s
+    assert (
+        "ln -sf /usr/share/zoneinfo/America/New_York /etc/localtime"
+        in s
+    )
+
+
+def test_firstrun_sh_sets_locale():
+    """v0.5.1+: pi-bake writes /etc/default/locale + runs
+    locale-gen for the operator's chosen locale. Pi OS Lite
+    ships only en_GB.UTF-8 pre-generated; other locales need
+    explicit generation."""
+    s = _firstrun_sh(
+        _node(locale="en_US.UTF-8"), "$6$abc$hash",
+    )
+    assert "locale-gen 'en_US.UTF-8'" in s
+    assert "update-locale 'LANG=en_US.UTF-8'" in s
+    # The locale.gen sed uncomments the chosen locale line.
+    assert "sed -i 's|^# *en_US.UTF-8 |en_US.UTF-8 |' /etc/locale.gen" in s
+
+
+def test_firstrun_sh_rejects_shell_unsafe_timezone():
+    """Belt-and-suspenders. NodeConfig doesn't validate timezone
+    format yet, so a hand-constructed instance could carry shell
+    metachars."""
+    safe = _node()
+    object.__setattr__(safe, "timezone", "; rm -rf /")
+    with pytest.raises(ValueError, match="shell-unsafe"):
+        _firstrun_sh(safe, "$6$abc$hash")
+
+
+def test_firstrun_sh_rejects_shell_unsafe_locale():
+    safe = _node()
+    object.__setattr__(safe, "locale", "en_US.UTF-8; echo pwned")
+    with pytest.raises(ValueError, match="shell-unsafe"):
+        _firstrun_sh(safe, "$6$abc$hash")
+
+
 def test_firstrun_sh_logs_to_var_log():
     """Operator-friendly: when something goes wrong on first boot,
     the log file is the first place to look."""

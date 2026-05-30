@@ -225,6 +225,17 @@ class _RaspbianBakerBase:
                 "authorized_keys contains heredoc terminator 'EOAUTH' — "
                 "refusing to bake"
             )
+        # Same DNS-label paranoia for the regional fields. timezone
+        # is an IANA name (e.g. America/New_York); locale is a glibc
+        # locale spec (e.g. en_US.UTF-8). Both should be alphanum +
+        # `_/.-` only.
+        for field_name, value in (
+            ("timezone", node.timezone), ("locale", node.locale),
+        ):
+            if any(c in value for c in "'\"`$\\\n ;|&"):
+                raise ValueError(
+                    f"{field_name} {value!r} contains shell-unsafe chars"
+                )
         return (
             "#!/bin/bash\n"
             "# pi-bake-generated firstrun.sh — runs once via systemd.run=\n"
@@ -240,6 +251,24 @@ class _RaspbianBakerBase:
             f"hostname {node.hostname!r}\n"
             "sed -i '/^127\\.0\\.1\\.1/d' /etc/hosts\n"
             f"echo $'127.0.1.1\\t{node.hostname}' >> /etc/hosts\n"
+            "\n"
+            "# Timezone. Direct file writes (not `timedatectl`) so this\n"
+            "# works in kernel-command-line.target where dbus may not be\n"
+            "# fully up. `ln -sf` handles re-runs gracefully.\n"
+            f"echo '{node.timezone}' > /etc/timezone\n"
+            f"ln -sf /usr/share/zoneinfo/{node.timezone} /etc/localtime\n"
+            "\n"
+            "# Locale. Pi OS Lite ships en_GB.UTF-8 pre-generated; for\n"
+            "# any other choice we need to uncomment it in\n"
+            "# /etc/locale.gen, regenerate, and set LANG. Pi OS\n"
+            "# /etc/locale.gen format is `<locale> <charset>` (the\n"
+            "# trailing charset is the disambiguator when a locale name\n"
+            "# is shared across encodings; we anchor on the locale name\n"
+            "# at line-start to avoid a partial-match).\n"
+            f"sed -i 's|^# *{node.locale} |{node.locale} |' /etc/locale.gen\n"
+            f"locale-gen '{node.locale}' 2>/dev/null || locale-gen\n"
+            f"update-locale 'LANG={node.locale}' 2>/dev/null"
+            f" || echo 'LANG={node.locale}' > /etc/default/locale\n"
             "\n"
             "# pi user: create if missing, then force /bin/bash shell.\n"
             "# Trixie's userconf-pi defaults to /usr/sbin/nologin; the\n"
