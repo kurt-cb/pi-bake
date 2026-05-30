@@ -5,6 +5,86 @@ tags via `./scripts/release-notes.sh`. To add notes for
 a new release, tag the commit with
 `git tag -a vX.Y.Z -m "..."` and re-run this script.
 
+## v0.6.0 — 2026-05-30
+
+Two operator-quality-of-life additions; two new ROADMAP items
+(EEPROM rescue + display info-screen, design only — deferred
+to focused future sessions).
+
+== Named primary login user ==
+
+New `user:` recipe block replaces the default `pi` user on
+Raspbian bakes:
+
+  user:
+    name: kurt                              # required
+    groups: [sudo, video, audio, plugdev]   # optional, sensible defaults
+    shell: /bin/bash                        # optional
+
+firstrun.sh creates the named user with bash shell + the
+listed groups + the operator's authorized_keys + a locked
+random password. The legacy /ssh + /userconf.txt fallback
+markers are skipped when a named user is set, so
+userconf-pi never fires and the pi user never gets created.
+
+Modern security: well-known default usernames are
+attack-targets. A named user (kurt, admin, operator) is
+less guess-prone than pi.
+
+Default groups give the named user the same capabilities
+the legacy pi user has on Pi OS Lite — sudo, hardware
+access (video / audio / i2c / spi / gpio), serial I/O
+(dialout), network admin (netdev). Override per recipe.
+
+Raspbian-only for v0.6.0. Alpine bakes silently ignore the
+block — Alpine's convention is root-as-operator and the
+apkovl mechanism doesn't have a clean named-user creation
+hook yet. Documented as a future enhancement.
+
+== Generic dtparam: shortcut ==
+
+Each `<key>: <value>` entry becomes a `dtparam=<key>=<value>`
+line in config.txt, prepended ahead of operator's explicit
+`config_txt:` list:
+
+  dtparam:
+    spi: on
+    i2c_arm: on
+    audio: on
+
+Pi OS Bookworm+ ships SPI / I2C / 1-Wire disabled by
+default — this is the convenience shortcut for enabling
+them. YAML's `on` / `off` auto-coerce to bools; pi-bake
+normalizes back to the config.txt convention ("on" / "off"
+strings). Keys validated as alphanum + underscore —
+anything weirder is probably a typo, refused at bake time.
+
+For things that don't fit the `dtparam=` prefix
+(`enable_uart=1`, `dtoverlay=...`, `gpu_mem=...`), use
+`config_txt:` directly. The two fields compose: dtparam
+shortcuts land first, operator's explicit lines after.
+
+== ROADMAP additions ==
+
+- #25 EEPROM rescue SD image (`pi-bake rescue`). Pi 4 / CM4 /
+  Pi 5 EEPROM reflash mechanism, equivalent to rpi-imager's
+  "Misc utility images → Bootloader". Designed; deferred
+  because hardware validation needs a Pi with an
+  intentionally-bricked EEPROM to test against.
+
+- #26 Display info-screen (HDMI / SPI / I2C). Surfaces
+  hostname + IP + SSH fingerprint on an attached display.
+  Three tiers (HDMI /etc/issue / SPI fbtft / I2C SSD1306),
+  each with different hardware-test requirements.
+  Designed; deferred because tier 2+3 need specific display
+  panels to validate.
+
+== Tests ==
+
+283 passed, 1 skipped. 15 new tests covering the user: +
+dtparam: schema additions, validation, round-trip, and
+firstrun.sh integration.
+
 ## v0.5.1 — 2026-05-30
 
 Three related fixes for honest defaults:
@@ -500,8 +580,6 @@ DOCS ALSO IN THIS RELEASE
     sys-mode is shipping. Four-partition layout (FAT /boot + ext4
     root-A + ext4 root-B + ext4 data), per-slot apkovl, watchdog
     revert on failed sanity-check.
-
-## v0.3.2 — 2026-05-27
 
 ## v0.3.1 — 2026-05-27
 
