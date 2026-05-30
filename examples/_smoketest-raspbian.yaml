@@ -14,10 +14,10 @@
 #   xzcat ./out/output.img.xz | sudo dd of=/dev/sdX bs=4M conv=fsync
 #   # → put SD in CM4, power-cycle
 #
-# Expected after boot: CM4 DHCPs as `td-cm4-raspbian`, sshd up,
+# Expected after boot: CM4 DHCPs as `cm4-lab-raspbian`, sshd up,
 # `pi` user with kurt-cb's pubkey authorized.
 
-hostname: td-cm4-raspbian
+hostname: cm4-lab-raspbian
 board: pi-5     # CM4 uses the same catalog entry as Pi 5
 os: raspbian
 # os_version: latest (default; permanent-latest redirect — currently
@@ -30,4 +30,4 @@ network:
   send_hostname: true
 
 output:
-  path: td-cm4-raspbian.img.xz
+  path: cm4-lab-raspbian.img.xz

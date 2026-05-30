@@ -24,7 +24,7 @@
 #
 # Output is .img.xz (not .img.gz like diskless mode).
 
-hostname: td-pi5-ext4
+hostname: pi5-ext4
 board: pi-5
 os: alpine
 os_mode: ext4
@@ -50,6 +50,6 @@ packages:
   - py3-pydbus
 
 output:
-  path: td-pi5-ext4.img.xz
+  path: pi5-ext4.img.xz
   # ext4 default is 2048 MB; bump if you need a larger root partition.
   image_size_mb: 2048

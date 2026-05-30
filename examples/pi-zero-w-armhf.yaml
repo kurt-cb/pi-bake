@@ -4,7 +4,7 @@
 # Alpine. Pi Zero 2 W and everything newer is aarch64. Pi-bake
 # resolves the right URL automatically from `board: pi-zero-w`.
 
-hostname: td-pi0w-1
+hostname: pi0w-lab
 board: pi-zero-w
 os: alpine
 
@@ -20,4 +20,4 @@ wifi:
   country: US
 
 output:
-  path: td-pi0w-1.img.gz
+  path: pi0w-lab.img.gz

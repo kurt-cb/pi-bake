@@ -29,7 +29,7 @@
 # Run `pi-bake list-os-versions --os raspbian` to see every
 # selectable version + its codename.
 
-hostname: td-pi5-bookworm
+hostname: pi5-bookworm
 board: pi-5
 os: raspbian
 os_version: stable      # -> 2025-05-13 Bookworm
@@ -55,4 +55,4 @@ network:
   send_hostname: true
 
 output:
-  path: td-pi5-bookworm.img.xz
+  path: pi5-bookworm.img.xz

@@ -4,13 +4,13 @@
 # (DHCP from upstream router); LAN-AP later via wlan0 (built-in
 # brcmfmac) or an external USB/M.2 radio.
 #
-# Packages: avahi gives the operator `https://td-pi5-1.local:8443/`
+# Packages: avahi gives the operator `https://pi5-wired.local:8443/`
 # IP-agnostic reachability — pretty much essential for an appliance
 # whose IP can change each cold boot. Currently requires network on
 # first boot (not in stock /apks cache); bake-time cache enrichment
 # is a v0.3 ROADMAP item.
 
-hostname: td-pi5-1
+hostname: pi5-wired
 board: pi-5
 os: alpine
 
@@ -27,4 +27,4 @@ packages:
   - py3-pydbus
 
 output:
-  path: td-pi5-1.img.gz
+  path: pi5-wired.img.gz

@@ -84,6 +84,7 @@ ALPINE = OSImage(
         "pi-3",           # aarch64
         "pi-4",           # aarch64
         "pi-5",           # aarch64 — experimental on 3.20+, settled on 3.21+
+        "pi-cm3", "pi-cm4", "pi-cm5",  # CMs share their family kernels
     }),
     notes=(
         "Pi 5 support is recent. If 3.21 fails on Pi 5, try 3.22+. "
@@ -146,7 +147,7 @@ RASPBIAN = OSImage(
         "https://downloads.raspberrypi.com/raspios_lite_{arch}_latest"
     ),
     image_kind="img_xz",
-    supports_boards=frozenset({"pi-3", "pi-4", "pi-5"}),
+    supports_boards=frozenset({"pi-3", "pi-4", "pi-5", "pi-cm3", "pi-cm4", "pi-cm5"}),
     notes=(
         "Recommended for Pi 4 / Pi 5. arch=arm64 in the URL maps to "
         "Board.arch=aarch64. `latest` follows Raspberry Pi's "
@@ -225,7 +226,7 @@ DEBIAN = OSImage(
     image_kind="img_xz",
     # No Pi 5 tested build at raspi.debian.net as of 2026-05; Pi 4
     # is the safe target. Pi 3 also works via the raspi_3 image.
-    supports_boards=frozenset({"pi-3", "pi-4"}),
+    supports_boards=frozenset({"pi-3", "pi-4", "pi-cm3", "pi-cm4"}),
     notes=(
         "Community Pi-on-Debian images from raspi.debian.net. Ships "
         "Pi-specific firmware in the boot partition — boots directly "
@@ -286,7 +287,7 @@ FEDORA = OSImage(
         "Fedora-Server-Host-Generic-{version}.{arch}.raw.xz"
     ),
     image_kind="img_xz",
-    supports_boards=frozenset({"pi-4", "pi-5"}),
+    supports_boards=frozenset({"pi-4", "pi-5", "pi-cm4", "pi-cm5"}),
     notes=(
         "Generic Fedora aarch64 image with cloud-init NoCloud "
         "preset by pi-bake. NOT directly Pi-bootable — operator "

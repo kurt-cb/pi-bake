@@ -18,7 +18,7 @@
 # DNS-label-safe hostname. Becomes /etc/hostname AND the name the
 # device announces via DHCP option 12 (when network.send_hostname).
 # Lowercase, digits, hyphens; <=63 chars; no leading/trailing hyphen.
-hostname: td-pi5-1
+hostname: pi5-wired
 
 # Target board. `pi-bake list-boards` shows the full set.
 # Common: pi-5, pi-4, pi-zero-2-w, pi-zero-w, pi-3.
@@ -39,7 +39,7 @@ ssh_pubkey: ~/.ssh/*.pub
 
 # Where the .img.gz lands. Operator dd's this to the SD card.
 output:
-  path: td-pi5-1.img.gz
+  path: pi5-wired.img.gz
   # Optional. 0 / omitted → backend default (400 MB for Alpine).
   # Bump if you bake huge package sets that don't fit.
   # image_size_mb: 800
@@ -77,7 +77,7 @@ output:
 # `/<arch>/APKINDEX.tar.gz` itself. See examples/pi-cm4-alpine-pxe.yaml
 # for a complete pxe-mode recipe.
 # pxe:
-#   server_url: http://192.168.4.2/td-cm4
+#   server_url: http://192.168.4.2/cm4-lab
 
 # IANA timezone. Default UTC. Some clocks (Pi has no RTC) come up
 # at 1970-01-01 anyway until chrony syncs — this is only the
@@ -169,8 +169,8 @@ output:
 #    read from <path>.pub. Key type is detected from the pubkey
 #    (ssh-ed25519 / ssh-rsa / ecdsa-sha2-*). Generate once with:
 #      ssh-keygen -t ed25519 -N '' \
-#        -f ~/.ssh/pi-host-keys/td-pi5-1 \
-#        -C "host@td-pi5-1"
+#        -f ~/.ssh/pi-host-keys/pi5-wired \
+#        -C "host@pi5-wired"
 #    then back the directory up. PRODUCTION-SAFE.
 #
 # 2) `usehost` — derive an ed25519 keypair deterministically from
@@ -189,7 +189,7 @@ output:
 #
 # Omit to let pi-bake auto-generate a fresh ed25519 pair per bake
 # (stable across reflashes of the same .img.gz; changes per build).
-# ssh_host_key: ~/.ssh/pi-host-keys/td-pi5-1
+# ssh_host_key: ~/.ssh/pi-host-keys/pi5-wired
 # ssh_host_key: usehost
 # ssh_host_key: seed:fleet-2026-q2
 
@@ -212,7 +212,7 @@ network:
 
   # dhcp-mode only. When true (default), dhcpcd sends the system
   # hostname in DHCP option 12 on DISCOVER/REQUEST — upstream DHCP
-  # server logs + lease tables show "td-pi5-1" not "?". Set false
+  # server logs + lease tables show "pi5-wired" not "?". Set false
   # to bake an intentional test fixture for DHCP-server-side
   # hostname recovery via mDNS or synthesized placeholder.
   send_hostname: true

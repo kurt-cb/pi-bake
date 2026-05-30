@@ -25,7 +25,7 @@
 # Run `pi-bake list-os-versions --os raspbian` to see every
 # selectable version.
 
-hostname: td-pi5-trixie
+hostname: pi5-trixie
 board: pi-5
 os: raspbian
 os_version: latest      # -> Pi OS's permanent-redirect (Trixie today)
@@ -50,4 +50,4 @@ network:
   send_hostname: true
 
 output:
-  path: td-pi5-trixie.img.xz
+  path: pi5-trixie.img.xz

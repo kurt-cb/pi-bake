@@ -29,7 +29,7 @@
 #   - nginx serving the TFTP root over HTTP (ngnix_setup.md)
 #   - CM4's EEPROM boot order set to network-first
 
-hostname: td-cm4
+hostname: cm4-lab
 board: pi-5         # CM4 uses the same linux-rpi catalog entry
 os: alpine
 os_mode: pxe
@@ -43,7 +43,7 @@ pxe:
   # `alpine_repo=` params. NOTE: must NOT include the `apks/<arch>/`
   # suffix — apk's repo fetcher appends `/<arch>/APKINDEX.tar.gz`
   # itself, and a doubled-up path 404s.
-  server_url: http://192.168.4.2/td-cm4
+  server_url: http://192.168.4.2/cm4-lab
 
 # Pure-PXE DHCP (the apkovl gets an `auto eth0 inet dhcp` block
 # automatically — see the alpine_pxe backend; dhcpcd alone isn't
@@ -61,4 +61,4 @@ network:
 output:
   # Output is a DIRECTORY (pxe mode) — operator copies its contents
   # into /var/lib/tftpboot/<cm4-mac>/ on the lab host.
-  path: ~/pibake-tftp/td-cm4
+  path: ~/pibake-tftp/cm4-lab
