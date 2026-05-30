@@ -19,4 +19,7 @@ dist/
 /t
 /t1
 /feature_request.md
+/nfs_setup.md
+/nfs_lxc_setup.md
+/ngnix_setup.md
 /design/security_notes.txt
