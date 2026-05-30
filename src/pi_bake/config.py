@@ -18,6 +18,25 @@ _VALID_HOSTNAME = re.compile(
 
 
 @dataclass
+class UserConfig:
+    """One login user — resolved form (after key inheritance from
+    the top-level `ssh_pubkey` / `extra_pubkeys`).
+
+    Lives inside NodeConfig.users (list). Empty list at the
+    NodeConfig level means "backend default" — Raspbian creates
+    `pi`, Alpine uses root-as-operator.
+    """
+    name: str
+    groups: list[str] = field(default_factory=list)
+    shell: str = "/bin/bash"
+    # authorized_keys content for /home/<name>/.ssh/authorized_keys.
+    # Already resolved — either the user's own ssh_pubkey field
+    # or the top-level fallback. Multi-line is fine; each line
+    # is one OpenSSH key.
+    authorized_keys: str = ""
+
+
+@dataclass
 class NodeConfig:
     """Bake recipe for a single Pi.
 
@@ -57,21 +76,22 @@ class NodeConfig:
     wifi_country: str = "US"
     timezone: str = "UTC"
     locale: str = "en_GB.UTF-8"
-    # Operator-named login user. Empty (default) -> the backend's
-    # default convention: Raspbian creates `pi`, Alpine uses
-    # `root`. When set, firstrun.sh creates THIS user with bash
-    # shell + the listed groups + the operator's authorized_keys,
-    # and skips creating Pi OS's default `pi` user entirely. Modern
-    # security practice: well-known default usernames are
-    # attack-targets. Default username is itself a guess vector;
-    # `kurt` or `admin` is less so than `pi`. Raspbian-only for
-    # v0.6.0 — Alpine support deferred.
-    user_name: str = ""
-    user_groups: list[str] = field(default_factory=lambda: [
-        "sudo", "video", "audio", "plugdev", "users", "games",
-        "input", "netdev", "gpio", "i2c", "spi",
-    ])
-    user_shell: str = "/bin/bash"
+    # Operator-named login users. Empty list (default) -> the
+    # backend's default convention: Raspbian creates `pi`, Alpine
+    # uses root-as-operator. When non-empty, firstrun.sh creates
+    # each user with its own bash shell + groups + authorized_keys
+    # + a locked random password. The legacy `pi` user is NOT
+    # created.
+    #
+    # Per-user authorized_keys are resolved at the Recipe layer:
+    # users with their own `ssh_pubkey:` get that key; users
+    # without inherit the top-level recipe key. The top-level
+    # key always lands in /root/.ssh/ as the recovery hatch.
+    #
+    # Modern security practice: well-known default usernames are
+    # attack-targets. Raspbian-only for v0.6.x. Alpine support
+    # deferred.
+    users: list[UserConfig] = field(default_factory=list)
     extra_pubkeys: list[str] = field(default_factory=list)
     # Optional static IP for eth0. Format "<addr>/<bits>" e.g.
     # "192.168.4.111/24". When set, /etc/network/interfaces uses

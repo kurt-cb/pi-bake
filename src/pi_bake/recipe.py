@@ -50,12 +50,39 @@ except ImportError as e:   # pragma: no cover
 
 _TOP_KEYS = frozenset({
     "hostname", "board", "os", "os_version", "os_mode", "timezone",
-    "locale", "user", "dtparam",
+    "locale", "user", "users", "dtparam",
     "ssh_pubkey", "extra_pubkeys", "ssh_host_key",
     "network", "wifi", "packages", "apk_fetch",
     "config_txt", "modules", "output", "pxe",
 })
-_USER_KEYS = frozenset({"name", "groups", "shell"})
+_USER_KEYS = frozenset({"name", "groups", "shell", "ssh_pubkey", "extra_pubkeys"})
+
+
+def _parse_user_block(raw: object, source: str) -> UserSpec:
+    """Build a UserSpec from a YAML user-block mapping.
+
+    Shared by the `user:` (singular) and `users:` (plural)
+    loaders. Validates the key set + required `name` field,
+    forwards optional keys to UserSpec which does its own
+    syntactic validation on name / groups / shell.
+    """
+    if not isinstance(raw, dict):
+        raise ValueError(
+            f"{source} must be a mapping, got {type(raw).__name__}"
+        )
+    _check_keys(raw, _USER_KEYS, source)
+    if "name" not in raw:
+        raise ValueError(f"{source}.name is required")
+    kwargs: dict = {"name": raw["name"]}
+    if "groups" in raw:
+        kwargs["groups"] = list(raw["groups"])
+    if "shell" in raw:
+        kwargs["shell"] = raw["shell"]
+    if "ssh_pubkey" in raw:
+        kwargs["ssh_pubkey"] = raw["ssh_pubkey"]
+    if "extra_pubkeys" in raw:
+        kwargs["extra_pubkeys"] = list(raw["extra_pubkeys"])
+    return UserSpec(**kwargs)
 
 
 def _stringify_dtparam_value(v: object) -> str:
@@ -190,6 +217,14 @@ class UserSpec:
         "input", "netdev", "gpio", "i2c", "spi",
     ])
     shell: str = "/bin/bash"
+    # Per-user authorized_keys override. Empty (default) inherits
+    # the top-level recipe `ssh_pubkey` + `extra_pubkeys`. Useful
+    # in multi-operator labs where alice and bob each want only
+    # their own laptop key trusted on their account.
+    # Three-form resolution like top-level: path / glob / inline /
+    # bare filename. Resolved at recipe-to-node-config time.
+    ssh_pubkey: str = ""
+    extra_pubkeys: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if not _VALID_USERNAME.match(self.name):
@@ -343,7 +378,13 @@ class Recipe:
     config_txt: list[str] = field(default_factory=list)
     modules: list[str] = field(default_factory=list)
     pxe: PxeSpec = field(default_factory=PxeSpec)
+    # `user:` (singular) and `users:` (plural) are mutually
+    # exclusive at YAML load time. Internally both populate
+    # `users` (the canonical list). dump_recipe emits the
+    # singular form when there's exactly one user with no
+    # per-user key override — minimizes round-trip clutter.
     user: UserSpec | None = None
+    users: list[UserSpec] = field(default_factory=list)
     # Generic dtparam shortcut. Each (key, value) pair becomes
     # `dtparam=<key>=<value>` in config.txt, prepended ahead of
     # operator's explicit `config_txt:` list. Use for the common
@@ -485,22 +526,40 @@ def _from_dict(d: dict, *, source: str = "<dict>") -> Recipe:
             )
 
     user_raw = d.get("user")
+    users_raw = d.get("users")
+    if user_raw is not None and users_raw is not None:
+        raise ValueError(
+            f"{source}: set EITHER `user:` (singular, one user) OR "
+            f"`users:` (plural, list of users), not both"
+        )
     user: UserSpec | None = None
+    users: list[UserSpec] = []
     if user_raw is not None:
-        if not isinstance(user_raw, dict):
+        user = _parse_user_block(user_raw, f"{source}: user")
+        # Single user also feeds the canonical `users:` list so
+        # downstream code only has one shape to read.
+        users = [user]
+    elif users_raw is not None:
+        if not isinstance(users_raw, list):
             raise ValueError(
-                f"{source}: `user` must be a mapping, "
-                f"got {type(user_raw).__name__}"
+                f"{source}: `users` must be a list of mappings, "
+                f"got {type(users_raw).__name__}"
             )
-        _check_keys(user_raw, _USER_KEYS, f"{source}: user")
-        if "name" not in user_raw:
-            raise ValueError(f"{source}: user.name is required")
-        user_kwargs: dict = {"name": user_raw["name"]}
-        if "groups" in user_raw:
-            user_kwargs["groups"] = list(user_raw["groups"])
-        if "shell" in user_raw:
-            user_kwargs["shell"] = user_raw["shell"]
-        user = UserSpec(**user_kwargs)
+        if not users_raw:
+            raise ValueError(
+                f"{source}: `users` must contain at least one entry "
+                f"(omit the block entirely for the default behavior)"
+            )
+        seen_names: set[str] = set()
+        for i, entry in enumerate(users_raw):
+            spec = _parse_user_block(entry, f"{source}: users[{i}]")
+            if spec.name in seen_names:
+                raise ValueError(
+                    f"{source}: users[{i}] duplicate name {spec.name!r} — "
+                    f"each user.name must be unique within the recipe"
+                )
+            seen_names.add(spec.name)
+            users.append(spec)
 
     extra_pubkeys = d.get("extra_pubkeys") or []
     if not isinstance(extra_pubkeys, list):
@@ -564,6 +623,7 @@ def _from_dict(d: dict, *, source: str = "<dict>") -> Recipe:
         modules=list(modules),
         pxe=pxe,
         user=user,
+        users=users,
         dtparam=dtparam,
     )
 
@@ -658,20 +718,58 @@ def dump_recipe(r: Recipe) -> str:
         lines.append("dtparam:")
         for k, v in r.dtparam.items():
             lines.append(f"  {k}: {v}")
-    if r.user is not None:
-        lines.append("")
-        lines.append("# Operator-named primary login user (replaces default `pi` on Raspbian).")
-        lines.append("user:")
-        lines.append(f"  name: {_yaml_str(r.user.name)}")
-        # Only emit groups/shell if they differ from defaults — keeps
-        # round-tripped recipes minimal.
-        default = UserSpec(name=r.user.name)
-        if list(r.user.groups) != list(default.groups):
-            lines.append("  groups:")
-            for g in r.user.groups:
-                lines.append(f"    - {_yaml_str(g)}")
-        if r.user.shell != default.shell:
-            lines.append(f"  shell: {_yaml_str(r.user.shell)}")
+    # Choose singular vs plural emission. Singular form is
+    # preferred when exactly one user is set AND it has no
+    # per-user key override — minimizes round-trip clutter.
+    emit_list = r.users
+    if not emit_list and r.user is not None:
+        emit_list = [r.user]
+    if emit_list:
+        only_one_no_override = (
+            len(emit_list) == 1
+            and not emit_list[0].ssh_pubkey
+            and not emit_list[0].extra_pubkeys
+        )
+        if only_one_no_override:
+            u = emit_list[0]
+            lines.append("")
+            lines.append(
+                "# Operator-named primary login user "
+                "(replaces default `pi` on Raspbian)."
+            )
+            lines.append("user:")
+            lines.append(f"  name: {_yaml_str(u.name)}")
+            default = UserSpec(name=u.name)
+            if list(u.groups) != list(default.groups):
+                lines.append("  groups:")
+                for g in u.groups:
+                    lines.append(f"    - {_yaml_str(g)}")
+            if u.shell != default.shell:
+                lines.append(f"  shell: {_yaml_str(u.shell)}")
+        else:
+            lines.append("")
+            lines.append(
+                "# Operator-named login users (multi-account labs / "
+                "per-user keys)."
+            )
+            lines.append("users:")
+            for u in emit_list:
+                lines.append(f"  - name: {_yaml_str(u.name)}")
+                default = UserSpec(name=u.name)
+                if list(u.groups) != list(default.groups):
+                    lines.append("    groups:")
+                    for g in u.groups:
+                        lines.append(f"      - {_yaml_str(g)}")
+                if u.shell != default.shell:
+                    lines.append(f"    shell: {_yaml_str(u.shell)}")
+                if u.ssh_pubkey:
+                    lines.append(
+                        f"    ssh_pubkey: {_yaml_str(u.ssh_pubkey)}"
+                    )
+                if u.extra_pubkeys:
+                    lines.append("    extra_pubkeys:")
+                    for k in u.extra_pubkeys:
+                        lines.append(f"      - {_yaml_str(k)}")
     lines.append("")
     lines.append("# Where the baked artifact lands (file for img bakes, dir for pxe)")
     lines.append("output:")
@@ -718,8 +816,32 @@ def recipe_to_node_config(r: Recipe):
     """
     from pi_bake.config import NodeConfig
 
+    from pi_bake.config import UserConfig
+
     primary = _resolve_pubkey(r.ssh_pubkey)
     extras = [_resolve_pubkey(k) for k in r.extra_pubkeys]
+
+    # users (plural) takes precedence; user (singular) backfills.
+    user_specs = r.users if r.users else (
+        [r.user] if r.user is not None else []
+    )
+    fallback_keys = "\n".join([primary] + extras).strip()
+    resolved_users: list[UserConfig] = []
+    for u in user_specs:
+        if u.ssh_pubkey:
+            u_primary = _resolve_pubkey(u.ssh_pubkey)
+            u_extras = [_resolve_pubkey(k) for k in u.extra_pubkeys]
+            keys = "\n".join([u_primary] + u_extras).strip()
+        else:
+            # Inherit top-level keys. Per-user extra_pubkeys
+            # (when set without per-user ssh_pubkey) compose
+            # ON TOP of the top-level set — additive.
+            u_extras = [_resolve_pubkey(k) for k in u.extra_pubkeys]
+            keys = "\n".join([fallback_keys] + u_extras).strip()
+        resolved_users.append(UserConfig(
+            name=u.name, groups=list(u.groups),
+            shell=u.shell, authorized_keys=keys,
+        ))
 
     priv_bytes = b""
     pub_bytes = b""
@@ -742,9 +864,7 @@ def recipe_to_node_config(r: Recipe):
             [f"dtparam={k}={v}" for k, v in r.dtparam.items()]
             + list(r.config_txt)
         ),
-        user_name=(r.user.name if r.user else ""),
-        user_groups=(list(r.user.groups) if r.user else _default_user_groups()),
-        user_shell=(r.user.shell if r.user else "/bin/bash"),
+        users=resolved_users,
         static_ipv4=r.network.address if r.network.mode == "static" else "",
         gateway_ipv4=r.network.gateway if r.network.mode == "static" else "",
         dhcp_send_hostname=r.network.send_hostname,

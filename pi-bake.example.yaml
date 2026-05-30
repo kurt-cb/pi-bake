@@ -104,21 +104,43 @@ output:
 # default usernames are attack-targets; a named user is less
 # guess-prone. firstrun.sh creates the user with bash shell + the
 # listed groups + your authorized_keys + a locked random password
-# (key auth only). When `user:` is set the legacy `/ssh` and
+# (key auth only). When set, the legacy `/ssh` and
 # `/userconf.txt` markers are also skipped — the `pi` user is
 # never created.
 #
-# Raspbian-only for v0.6.0. Alpine bakes silently ignore this
+# Raspbian-only for v0.6.x. Alpine bakes silently ignore the
 # block (Alpine's convention is root-as-operator; named-user
 # support for Alpine is a future enhancement).
 #
-# Required when block present: `name` (Unix login-name format).
-# Optional: `groups` (defaults to the same set Pi OS gives `pi`),
-# `shell` (defaults to /bin/bash).
+# TWO FORMS — pick whichever fits:
+#
+# (a) `user:` singular — one operator-named user, uses the
+#     top-level `ssh_pubkey` + `extra_pubkeys` above. Required:
+#     `name` (Unix login-name format). Optional: `groups`
+#     (defaults to the same set Pi OS gives `pi`), `shell`
+#     (defaults to /bin/bash).
 # user:
 #   name: kurt
 #   groups: [sudo, video, audio, plugdev, gpio, i2c, spi]
 #   shell: /bin/bash
+#
+# (b) `users:` plural (v0.6.1+) — multiple users, with optional
+#     per-user `ssh_pubkey:` / `extra_pubkeys:` overrides. Useful
+#     for multi-operator labs (alice + bob with different
+#     laptop keys) or service accounts. Per-user `ssh_pubkey`
+#     REPLACES the top-level set for that user. Per-user
+#     `extra_pubkeys` (without `ssh_pubkey`) COMPOSE on top of
+#     the top-level set — additive.
+# users:
+#   - name: alice
+#     groups: [sudo, docker]
+#     ssh_pubkey: ~/.ssh/alice-laptop.pub
+#   - name: bob
+#     groups: [users, video]
+#     # no ssh_pubkey -> inherits top-level
+#   - name: monitoring
+#     shell: /usr/sbin/nologin
+#     ssh_pubkey: monitoring-bot-key.pub
 
 # dtparam shortcuts. Each entry becomes a `dtparam=<key>=<value>`
 # line in /boot/firmware/config.txt (via usercfg.txt include).

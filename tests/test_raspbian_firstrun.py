@@ -152,13 +152,18 @@ def test_firstrun_sh_sets_hostname():
 
 
 def test_firstrun_sh_uses_named_user_when_set():
-    """When NodeConfig.user_name is non-empty, firstrun.sh creates
-    THAT user instead of `pi`. Modern security: well-known default
-    usernames are attack-targets."""
+    """When NodeConfig.users is non-empty, firstrun.sh creates
+    THOSE users instead of `pi`. Modern security: well-known
+    default usernames are attack-targets."""
+    from pi_bake.config import UserConfig
     n = _node()
-    object.__setattr__(n, "user_name", "kurt")
-    object.__setattr__(n, "user_groups", ["sudo", "docker"])
-    object.__setattr__(n, "user_shell", "/bin/bash")
+    object.__setattr__(n, "users", [
+        UserConfig(
+            name="kurt", groups=["sudo", "docker"],
+            shell="/bin/bash",
+            authorized_keys="ssh-ed25519 AAAAtest op@k",
+        ),
+    ])
     s = _firstrun_sh(n, "$6$abc$hash")
     # `kurt` user creation + ssh setup
     assert "useradd -m -G sudo,docker -s /bin/bash kurt" in s
@@ -170,14 +175,36 @@ def test_firstrun_sh_uses_named_user_when_set():
     assert "/home/pi" not in s
 
 
-def test_firstrun_sh_falls_back_to_pi_when_no_user_set():
-    """Back-compat: NodeConfig.user_name = '' (default) keeps
-    the v0.5.1 behavior of creating the `pi` user."""
+def test_firstrun_sh_falls_back_to_pi_when_no_users_set():
+    """Back-compat: NodeConfig.users = [] (default) keeps the
+    v0.5.1 behavior of creating the `pi` user."""
     n = _node()
-    assert n.user_name == ""
+    assert n.users == []
     s = _firstrun_sh(n, "$6$abc$hash")
     assert "useradd" in s and " pi\n" in s
     assert "/home/pi/.ssh/authorized_keys" in s
+
+
+def test_firstrun_sh_creates_multiple_users():
+    """With multiple users, firstrun.sh creates each independently
+    with its own groups + keys."""
+    from pi_bake.config import UserConfig
+    n = _node()
+    object.__setattr__(n, "users", [
+        UserConfig(name="alice", groups=["sudo"], shell="/bin/bash",
+                   authorized_keys="ssh-ed25519 AAAA-ALICE alice@x"),
+        UserConfig(name="bob", groups=["users"], shell="/bin/bash",
+                   authorized_keys="ssh-ed25519 AAAA-BOB bob@y"),
+    ])
+    s = _firstrun_sh(n, "$6$abc$hash")
+    # Both users appear independently.
+    assert "useradd -m -G sudo -s /bin/bash alice" in s
+    assert "useradd -m -G users -s /bin/bash bob" in s
+    # Per-user authorized_keys land in separate heredocs.
+    assert "AAAA-ALICE" in s
+    assert "AAAA-BOB" in s
+    # Order: alice block ends before bob block begins.
+    assert s.index("alice") < s.index("bob")
 
 
 def test_firstrun_sh_sets_timezone():

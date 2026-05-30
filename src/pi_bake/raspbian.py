@@ -111,6 +111,45 @@ _BOOT_PART = 1
 _ROOT_PART = 2
 
 
+def _user_creation_block(users, pi_hash: str) -> str:
+    """Render the firstrun.sh user-creation section.
+
+    For each UserConfig, emit:
+      - useradd if missing (with bash + groups + shell from the
+        UserConfig)
+      - usermod -s to force the shell (the load-bearing line for
+        the Trixie userconf-pi nologin default)
+      - chpasswd to set the locked random password (key auth
+        only; password value never used)
+      - /home/<name>/.ssh setup with the user's authorized_keys
+    """
+    out: list[str] = []
+    for u in users:
+        groups = ",".join(u.groups)
+        home = f"/home/{u.name}"
+        out.append(
+            f"# Login user {u.name!r}: create if missing, force {u.shell}.\n"
+            f"# (Trixie's userconf-pi defaults to /usr/sbin/nologin for\n"
+            f"# the `pi` user; the explicit usermod is load-bearing on\n"
+            f"# any user we create.)\n"
+            f"if ! id {u.name} >/dev/null 2>&1; then\n"
+            f"  useradd -m -G {groups} -s {u.shell} {u.name}\n"
+            "fi\n"
+            f"usermod -s {u.shell} {u.name}\n"
+            f"echo '{u.name}:{pi_hash}' | chpasswd -e\n"
+            "\n"
+            f"# Authorized_keys for {u.name}.\n"
+            f"install -o {u.name} -g {u.name} -m 700 -d {home}/.ssh\n"
+            f"cat > {home}/.ssh/authorized_keys <<'EOAUTH'\n"
+            f"{u.authorized_keys}\n"
+            "EOAUTH\n"
+            f"chown {u.name}:{u.name} {home}/.ssh/authorized_keys\n"
+            f"chmod 600 {home}/.ssh/authorized_keys\n"
+            "\n"
+        )
+    return "".join(out)
+
+
 def _random_locked_password_hash() -> str:
     """sha-512 crypt of a random throwaway password. Locks the
     'pi' account against password login as a defence-in-depth even
@@ -225,6 +264,14 @@ class _RaspbianBakerBase:
                 "authorized_keys contains heredoc terminator 'EOAUTH' — "
                 "refusing to bake"
             )
+        # Per-user authorized_keys also embedded via heredoc; same
+        # paranoia.
+        for u in node.users:
+            if "EOAUTH" in u.authorized_keys:
+                raise ValueError(
+                    f"user {u.name!r} authorized_keys contains heredoc "
+                    f"terminator 'EOAUTH' — refusing to bake"
+                )
         # Same DNS-label paranoia for the regional fields. timezone
         # is an IANA name (e.g. America/New_York); locale is a glibc
         # locale spec (e.g. en_US.UTF-8). Both should be alphanum +
@@ -236,13 +283,23 @@ class _RaspbianBakerBase:
                 raise ValueError(
                     f"{field_name} {value!r} contains shell-unsafe chars"
                 )
-        # User block uses a NodeConfig field validated upstream
-        # by UserSpec.__post_init__ (DNS-label-style username,
-        # alphanum group names, shell path without metachars).
-        # Choose login user: operator-named when set, else pi.
-        login_user = node.user_name or "pi"
-        login_home = f"/home/{login_user}"
-        login_groups = ",".join(node.user_groups)
+        # User list. node.users is the canonical list of operator-
+        # named users; an empty list falls back to the legacy `pi`
+        # user with operator's authorized_keys. UserSpec already
+        # validated name / groups / shell at recipe-load time.
+        if node.users:
+            user_blocks = list(node.users)
+        else:
+            from pi_bake.config import UserConfig
+            user_blocks = [UserConfig(
+                name="pi",
+                groups=[
+                    "sudo", "video", "audio", "plugdev", "users",
+                    "games", "input", "netdev", "gpio", "i2c", "spi",
+                ],
+                shell="/bin/bash",
+                authorized_keys=node.authorized_keys_text(),
+            )]
         return (
             "#!/bin/bash\n"
             "# pi-bake-generated firstrun.sh — runs once via systemd.run=\n"
@@ -277,25 +334,7 @@ class _RaspbianBakerBase:
             f"update-locale 'LANG={node.locale}' 2>/dev/null"
             f" || echo 'LANG={node.locale}' > /etc/default/locale\n"
             "\n"
-            f"# Login user: {login_user!r}. create if missing, then\n"
-            f"# force {node.user_shell} shell. (Trixie's userconf-pi\n"
-            "# defaults to /usr/sbin/nologin even for non-pi users\n"
-            "# in some configurations; the explicit usermod below is\n"
-            "# load-bearing.)\n"
-            f"if ! id {login_user} >/dev/null 2>&1; then\n"
-            f"  useradd -m -G {login_groups}"
-            f" -s {node.user_shell} {login_user}\n"
-            "fi\n"
-            f"usermod -s {node.user_shell} {login_user}\n"
-            f"echo '{login_user}:{pi_hash}' | chpasswd -e\n"
-            "\n"
-            f"# Authorized_keys for {login_user}.\n"
-            f"install -o {login_user} -g {login_user} -m 700 -d {login_home}/.ssh\n"
-            f"cat > {login_home}/.ssh/authorized_keys <<'EOAUTH'\n"
-            f"{node.authorized_keys_text()}"
-            "EOAUTH\n"
-            f"chown {login_user}:{login_user} {login_home}/.ssh/authorized_keys\n"
-            f"chmod 600 {login_home}/.ssh/authorized_keys\n"
+            + _user_creation_block(user_blocks, pi_hash) +
             "\n"
             "# Enable sshd. ssh.service is installed but not enabled by\n"
             "# default on Pi OS Lite.\n"

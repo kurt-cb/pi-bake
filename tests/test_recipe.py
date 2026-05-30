@@ -953,22 +953,26 @@ def test_user_block_threaded_to_node_config():
         output=OutputSpec(path="/tmp/x.img.xz"),
     )
     node, _ = recipe_to_node_config(r)
-    assert node.user_name == "kurt"
-    assert node.user_groups == ["sudo", "docker"]
-    assert node.user_shell == "/bin/bash"
+    assert len(node.users) == 1
+    assert node.users[0].name == "kurt"
+    assert node.users[0].groups == ["sudo", "docker"]
+    assert node.users[0].shell == "/bin/bash"
+    # Single user with no per-user key override inherits the
+    # top-level ssh_pubkey.
+    assert _PUBKEY in node.users[0].authorized_keys
 
 
 def test_no_user_block_falls_back_to_pi_defaults():
     """Back-compat: recipes without `user:` keep current behavior
-    (raspbian creates the `pi` user). NodeConfig.user_name is the
-    sentinel — empty means 'use backend default'."""
+    (raspbian creates the `pi` user). NodeConfig.users empty =
+    'use backend default'."""
     r = Recipe(
         hostname="t", board="pi-5", os="raspbian",
         ssh_pubkey=_PUBKEY,
         output=OutputSpec(path="/tmp/x.img.xz"),
     )
     node, _ = recipe_to_node_config(r)
-    assert node.user_name == ""
+    assert node.users == []
 
 
 def test_user_block_round_trips(tmp_path):
@@ -1086,3 +1090,192 @@ def test_dtparam_empty_default():
         output=OutputSpec(path="/tmp/x.img.xz"),
     )
     assert r.dtparam == {}
+
+
+# --------------------------------------------------------------------------- #
+# users: plural (v0.6.1+)                                                      #
+# --------------------------------------------------------------------------- #
+
+def test_users_plural_loads_from_yaml(tmp_path):
+    src = tmp_path / "r.yaml"
+    src.write_text(f'''
+hostname: foo
+board: pi-5
+os: raspbian
+ssh_pubkey: "{_PUBKEY}"
+users:
+  - name: alice
+    groups: [sudo]
+  - name: bob
+    groups: [users]
+output:
+  path: /tmp/x.img.xz
+''')
+    r = load_recipe(src)
+    assert len(r.users) == 2
+    assert r.users[0].name == "alice"
+    assert r.users[1].name == "bob"
+
+
+def test_users_plural_per_user_keys(tmp_path):
+    """Per-user ssh_pubkey overrides the top-level one for that
+    user's authorized_keys."""
+    src = tmp_path / "r.yaml"
+    src.write_text(f'''
+hostname: foo
+board: pi-5
+os: raspbian
+ssh_pubkey: "ssh-ed25519 AAAA-TOP top@host"
+users:
+  - name: alice
+    ssh_pubkey: "ssh-ed25519 AAAA-ALICE alice@laptop"
+  - name: bob
+    # no ssh_pubkey -> inherits top-level
+output:
+  path: /tmp/x.img.xz
+''')
+    r = load_recipe(src)
+    node, _ = recipe_to_node_config(r)
+    # alice has her own key; bob inherits the top-level key.
+    alice = next(u for u in node.users if u.name == "alice")
+    bob = next(u for u in node.users if u.name == "bob")
+    assert "AAAA-ALICE" in alice.authorized_keys
+    assert "AAAA-TOP" not in alice.authorized_keys
+    assert "AAAA-TOP" in bob.authorized_keys
+    assert "AAAA-ALICE" not in bob.authorized_keys
+
+
+def test_users_plural_extra_pubkeys_compose_on_top_when_no_pubkey():
+    """When a user block has extra_pubkeys but no ssh_pubkey, the
+    extras compose ON TOP of the top-level set — additive, not
+    replacing."""
+    from pi_bake.recipe import UserSpec
+    r = Recipe(
+        hostname="t", board="pi-5", os="raspbian",
+        ssh_pubkey="ssh-ed25519 AAAA-TOP top@host",
+        extra_pubkeys=["ssh-ed25519 AAAA-TOP-EXTRA extra@host"],
+        users=[UserSpec(
+            name="alice",
+            extra_pubkeys=["ssh-ed25519 AAAA-ALICE-EXTRA alice@extra"],
+        )],
+        output=OutputSpec(path="/tmp/x.img.xz"),
+    )
+    node, _ = recipe_to_node_config(r)
+    keys = node.users[0].authorized_keys
+    assert "AAAA-TOP" in keys
+    assert "AAAA-TOP-EXTRA" in keys
+    assert "AAAA-ALICE-EXTRA" in keys
+
+
+def test_user_and_users_both_set_rejected(tmp_path):
+    """Set exactly one — `user:` (singular) OR `users:` (plural),
+    not both. The intent is unclear otherwise."""
+    src = tmp_path / "r.yaml"
+    src.write_text(f'''
+hostname: foo
+board: pi-5
+os: raspbian
+ssh_pubkey: "{_PUBKEY}"
+user:
+  name: kurt
+users:
+  - name: alice
+output:
+  path: /tmp/x.img.xz
+''')
+    with pytest.raises(ValueError, match="EITHER `user:` .* OR `users:`"):
+        load_recipe(src)
+
+
+def test_users_plural_empty_list_rejected(tmp_path):
+    """An empty `users:` list is operator confusion — they probably
+    meant to omit the block. Refuse loudly."""
+    src = tmp_path / "r.yaml"
+    src.write_text(f'''
+hostname: foo
+board: pi-5
+os: raspbian
+ssh_pubkey: "{_PUBKEY}"
+users: []
+output:
+  path: /tmp/x.img.xz
+''')
+    with pytest.raises(ValueError, match="at least one entry"):
+        load_recipe(src)
+
+
+def test_users_plural_duplicate_name_rejected(tmp_path):
+    """Two users with the same name would have firstrun.sh trying
+    to useradd a second time + clobbering the first user's setup.
+    Refuse at bake time."""
+    src = tmp_path / "r.yaml"
+    src.write_text(f'''
+hostname: foo
+board: pi-5
+os: raspbian
+ssh_pubkey: "{_PUBKEY}"
+users:
+  - name: alice
+  - name: alice
+output:
+  path: /tmp/x.img.xz
+''')
+    with pytest.raises(ValueError, match="duplicate name"):
+        load_recipe(src)
+
+
+def test_users_plural_round_trips_as_plural(tmp_path):
+    """A two-user recipe dumps as `users:` (plural)."""
+    from pi_bake.recipe import UserSpec
+    r1 = Recipe(
+        hostname="td", board="pi-5", os="raspbian",
+        ssh_pubkey=_PUBKEY,
+        users=[
+            UserSpec(name="alice", groups=["sudo"]),
+            UserSpec(name="bob", groups=["users"]),
+        ],
+        output=OutputSpec(path="/tmp/x.img.xz"),
+    )
+    text = dump_recipe(r1)
+    assert "users:" in text
+    assert "- name: alice" in text
+    assert "- name: bob" in text
+    p = tmp_path / "round.yaml"
+    p.write_text(text)
+    r2 = load_recipe(p)
+    assert len(r2.users) == 2
+    assert {u.name for u in r2.users} == {"alice", "bob"}
+
+
+def test_single_user_dumps_as_singular(tmp_path):
+    """One user, no per-user keys -> emit `user:` (singular) for
+    less round-trip clutter."""
+    from pi_bake.recipe import UserSpec
+    r1 = Recipe(
+        hostname="td", board="pi-5", os="raspbian",
+        ssh_pubkey=_PUBKEY,
+        user=UserSpec(name="kurt"),
+        output=OutputSpec(path="/tmp/x.img.xz"),
+    )
+    text = dump_recipe(r1)
+    assert "\nuser:" in text
+    assert "\nusers:" not in text
+
+
+def test_single_user_with_own_key_dumps_as_plural(tmp_path):
+    """One user with a per-user ssh_pubkey -> must use plural
+    form since `user:` (singular) schema has no ssh_pubkey field
+    in its dumped form."""
+    from pi_bake.recipe import UserSpec
+    r1 = Recipe(
+        hostname="td", board="pi-5", os="raspbian",
+        ssh_pubkey=_PUBKEY,
+        users=[UserSpec(
+            name="kurt",
+            ssh_pubkey="~/.ssh/kurt-laptop.pub",
+        )],
+        output=OutputSpec(path="/tmp/x.img.xz"),
+    )
+    text = dump_recipe(r1)
+    assert "\nusers:" in text
+    assert "ssh_pubkey: ~/.ssh/kurt-laptop.pub" in text
