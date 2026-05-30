@@ -1096,6 +1096,103 @@ validate against.
 
 ---
 
+## 27. Raspbian PXE backend (`os_mode: pxe` for Raspbian)
+**📋 planned — design only**
+
+Alpine PXE shipped in v0.3.2 (ROADMAP #20) because the stock
+Alpine RPi initramfs natively understands `apkovl=URL` +
+`alpine_repo=URL` kernel cmdline params and wgets them at boot.
+Pi OS has no equivalent — its initramfs expects to mount root
+from a local-disk `PARTUUID=...`.
+
+Three implementation paths, each with different lab + bake-host
+tradeoffs:
+
+### (a) NFS-root  — recommended v1, ~300 LOC
+
+Lab host runs `nfs-kernel-server` + dnsmasq-tftp. Pi-bake bakes:
+
+- TFTP tree per host (under `/var/lib/tftpboot/<mac>/`):
+  - bootcode + kernel + initramfs + DTBs (copied from Pi OS
+    `/boot/firmware/`)
+  - cmdline.txt with `root=/dev/nfs nfsroot=<server>:<path>
+    rw ip=dhcp`
+- NFS export tree per host (under
+  `/srv/nfs/pi-bake/<hostname>/`):
+  - full rootfs extracted from the Pi OS .img.xz
+  - operator's hostname / SSH keys / user / etc. applied at
+    bake time (same as the losetup-based Raspbian backend)
+- Lab-side: `/etc/exports` line added per host (operator
+  responsibility, see `examples/nfs-setup.md`)
+
+Standard pattern; Raspberry Pi Foundation publishes a tutorial
+on it. Recipe:
+
+```yaml
+hostname: td-cm4-1
+board: pi-5
+os: raspbian
+os_mode: pxe
+pxe:
+  server_url: http://lab/td-cm4   # for any HTTP-served bits
+  nfs_root: 192.168.4.2:/srv/nfs/pi-bake/td-cm4-1
+output:
+  path: /var/lib/tftpboot/dca632xxxxxx/  # directory output
+```
+
+Tradeoffs:
+- Lab needs nfs-kernel-server (incremental complexity over
+  Alpine PXE's tftp+http).
+- Rootfs is mutable + persistent across reboots (different
+  semantics from Alpine PXE where the apkovl is the only
+  persistent state).
+- Concurrent bakes need separate per-host export trees.
+
+### (b) iSCSI-root  — heavier, ~400 LOC
+
+Similar to NFS but with an iSCSI target on the lab. More
+isolated per-host (target LUN per Pi) but the iSCSI tooling
+chain (targetcli, iscsiadm) is heavier than NFS. Probably
+overkill for hobby/lab.
+
+### (c) RAM-rootfs (squashfs over HTTP) — cleanest, ~500 LOC
+
+Matches Alpine PXE's "just a web server" lab pattern. Pi-bake
+bakes:
+
+- TFTP tree (kernel + initramfs + DTBs).
+- HTTP-served squashfs tarball of the rootfs.
+- Modified initramfs with a hook that wgets the squashfs,
+  loads it into tmpfs, pivots root.
+
+Operator's lab only needs nginx + dnsmasq-tftp (no NFS).
+Reboots are stateless — squashfs is read-only, any state
+goes to tmpfs and disappears.
+
+Tradeoffs:
+- Custom initramfs work is real engineering (kernel module
+  list, cpio repacking, signature verification).
+- Squashfs has to be re-served every boot (no persistence
+  unless paired with an overlay-on-NBD or similar).
+
+### Implementation order
+
+1. v0.7.0 ships (a) NFS-root as the canonical Raspbian PXE
+   mode. Adds `pxe.nfs_root` field to the PxeSpec schema.
+2. Future: if operators ask for stateless or lab-without-NFS,
+   add (c) as an alternative `pxe.mode: ram-rootfs`.
+3. iSCSI deferred indefinitely unless someone has a concrete
+   need.
+
+Hardware validation: same lab setup as Alpine PXE (CM4 with
+EEPROM netboot priority) plus an NFS server. Add a row to
+`tested_bakes.yaml` once a fresh bake boots end-to-end.
+
+See `src/pi_bake/alpine_pxe.py` (the parallel structure for
+Alpine) when designing the Raspbian version.
+
+---
+
 ## Real-hardware lessons (informational)
 
 Lessons learned while shipping v0.0.x → v0.2 on real Pi
