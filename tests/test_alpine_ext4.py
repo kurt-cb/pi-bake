@@ -253,3 +253,70 @@ def test_install_busybox_symlinks_fails_if_sbin_init_not_in_manifest(tmp_path):
     (root / "etc" / "busybox-paths.d" / "busybox").write_text("bin/sh\n")
     with pytest.raises(RuntimeError, match="/sbin/init still missing"):
         alpine_ext4._install_busybox_symlinks(root)
+
+
+def test_install_busybox_symlinks_routes_through_sudo_when_mount_unwritable(
+    tmp_path, monkeypatch,
+):
+    """Regression for the 2026-05-31 bug: when alpine_ext4 ran as a
+    non-root operator with sudo, native pathlib `symlink_to` /
+    `mkdir` calls hit PermissionError on the root-owned mount because
+    `_install_busybox_symlinks` didn't route through `imgxz._sudo`
+    like the rest of the module. Now it must detect non-writable
+    mounts and batch every write through one `sudo sh -c` shell-out
+    (one call, not one-per-symlink — ~300 applets).
+
+    We fake the non-root case by pinning os.access to return False
+    for the mount root, then assert imgxz._sudo got the consolidated
+    sh -c command containing every expected `ln -s` and a
+    `mkdir -p` per unique parent.
+    """
+    root = tmp_path / "rootfs"
+    (root / "bin").mkdir(parents=True)
+    (root / "bin" / "busybox").write_bytes(b"x")
+    (root / "etc" / "busybox-paths.d").mkdir(parents=True)
+    (root / "etc" / "busybox-paths.d" / "busybox").write_text(
+        "sbin/init\n"
+        "bin/sh\n"
+        "usr/sbin/halt\n"
+    )
+    # Pre-create sbin/init under the mount so the final sanity check
+    # passes (we're faking "the sudo'd ln succeeded" without actually
+    # running sudo). bin/sh + usr/sbin/halt land in the batched script
+    # that the recorder captures.
+    (root / "sbin").mkdir()
+    (root / "sbin" / "init").symlink_to("/bin/busybox")
+
+    # Force the non-root code path: pretend the mount isn't writable.
+    real_access = os.access
+    def fake_access(path, mode):
+        if Path(path) == root and mode == os.W_OK:
+            return False
+        return real_access(path, mode)
+    monkeypatch.setattr(alpine_ext4.os, "access", fake_access)
+
+    captured: list[tuple] = []
+    def fake_sudo(*args, **kwargs):
+        captured.append((args, kwargs))
+        return None
+    monkeypatch.setattr(alpine_ext4.imgxz, "_sudo", fake_sudo)
+
+    alpine_ext4._install_busybox_symlinks(root)
+
+    # Exactly one sudo invocation — batched, not one-per-symlink.
+    assert len(captured) == 1, \
+        f"expected 1 batched sudo call, got {len(captured)}"
+    args, kwargs = captured[0]
+    assert args[0] == "sh", "must run via sh"
+    assert args[1] == "-c"
+    script = args[2]
+    # /sbin/init was pre-created (skipped), so it shouldn't reappear.
+    assert "sbin/init" not in script
+    # The two paths that needed writing both show up.
+    assert "ln -s /bin/busybox" in script
+    assert f"{root}/bin/sh" in script
+    assert f"{root}/usr/sbin/halt" in script
+    # mkdir -p must be present for unique parents not yet existing.
+    assert "mkdir -p" in script
+    # set -e — fail fast inside the batched script.
+    assert script.startswith("set -e")

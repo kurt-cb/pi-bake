@@ -391,15 +391,30 @@ def _install_busybox_symlinks(root_mnt: Path) -> None:
 
     Without this step the kernel boots, mounts root, then panics with
     "Cannot find init" — observed firsthand 2026-05-27 bake test.
+
+    Privileges: the mount is root-owned when the bake's `sudo mount`
+    ran as a normal user with sudo (the documented local-laptop flow).
+    Native Python writes into it fail with PermissionError. Fix:
+    detect writability once, then either do native ops (fast — used
+    by tests and by root-in-LXC bakes that own the mount) or batch
+    the whole symlink set into a single `sudo sh -c '...'` invocation
+    (~300 applet paths in one shell-out, not 300 sudo subprocesses).
     """
+    import shlex
     manifest = root_mnt / "etc" / "busybox-paths.d" / "busybox"
     if not manifest.is_file():
         raise RuntimeError(
             f"busybox manifest missing: {manifest}. The busybox apk "
             f"didn't install correctly — check the `apk add` output."
         )
+    # Decide once: can we write into the mount as our own euid? If yes,
+    # native pathlib ops are fastest. If no (typical: non-root operator
+    # who sudo-mounted a partition root owns), batch via `sudo sh -c`.
+    need_sudo = not os.access(root_mnt, os.W_OK)
     n_created = 0
     n_skipped = 0
+    script_lines: list[str] = ["set -e"]
+    parents_seen: set[Path] = set()
     for rel_path in manifest.read_text().splitlines():
         rel_path = rel_path.strip()
         if not rel_path or rel_path.startswith("#"):
@@ -411,14 +426,24 @@ def _install_busybox_symlinks(root_mnt: Path) -> None:
         if target.exists() or target.is_symlink():
             n_skipped += 1
             continue
-        # Ensure parent dir exists; some applet paths live in
-        # /usr/sbin etc. that the bootstrap may not have created.
-        # Native Python ops work fine: in the bake we're root in
-        # the LXC and own the mounted ext4 root; in tests the
-        # caller owns the temp dir.
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.symlink_to("/bin/busybox")
+        if need_sudo:
+            # Defer all writes to one batched shell-out below.
+            if target.parent not in parents_seen:
+                script_lines.append(
+                    f"mkdir -p {shlex.quote(str(target.parent))}"
+                )
+                parents_seen.add(target.parent)
+            script_lines.append(
+                f"ln -s /bin/busybox {shlex.quote(str(target))}"
+            )
+        else:
+            # Native fast path — bake runs as root (LXC), or test owns
+            # the temp tree, etc.
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.symlink_to("/bin/busybox")
         n_created += 1
+    if need_sudo and n_created > 0:
+        imgxz._sudo("sh", "-c", "\n".join(script_lines), capture=False)
     LOG.info(
         "busybox symlinks: %d created (incl. /sbin/init), %d skipped",
         n_created, n_skipped,
