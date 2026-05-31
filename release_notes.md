@@ -19,6 +19,7 @@ for the tag-time checklist.
 
 | Version | Date | Headline |
 |---|---|---|
+| [v0.6.6](#v066--2026-05-31--bugfix-alpine_ext4-bake-as-non-root) | 2026-05-31 | Hotfix: `os_mode: ext4` bake works for the documented non-root + sudo flow (busybox-symlink step was native-write, crashing mid-bake) |
 | [v0.6.5](#v065--2026-05-31--raspbian-pxe-backend-nfs-root) | 2026-05-31 | Raspbian PXE backend (`os_mode: pxe` for Raspbian) — two-tarball NFS-root deploy with all customization done at bake time |
 | [v0.6.2](#v062--2026-05-30--cm-board-catalog--example-cleanup--raspbian-bugfixes) | 2026-05-30 | pi-cm3/cm4/cm5 catalog entries + example hostname cleanup + raspbian.py bugfixes from v0.6.1 |
 | [v0.6.1](#v061--2026-05-29--multi-user-with-per-user-key-fallback) | 2026-05-29 | Multi-user via `users:` plural with per-user ssh_pubkey fallback to top-level |
@@ -44,6 +45,41 @@ for the tag-time checklist.
 | [v0.0.1](#v001--2026-05-23--first-real-hardware-shape) | 2026-05-23 | Static IP + time sync + WiFi firmware + RTC-less boot survival |
 
 ---
+
+## v0.6.6 — 2026-05-31 — Bugfix: alpine_ext4 bake as non-root
+
+Hotfix. `os_mode: ext4` only worked when the bake ran as root
+(e.g. inside the privileged pi-bake LXC container). For the
+documented local-laptop flow — normal user with sudo — the bake
+got ~halfway through (losetup, mkfs, apk bootstrap all worked
+because they used `imgxz._sudo`), then crashed in
+[`_install_busybox_symlinks`](src/pi_bake/alpine_ext4.py#L374)
+with `PermissionError`. That step recreates ~300 busybox applet
+symlinks (`/sbin/init`, `/bin/sh`, …) that `apk add --no-scripts`
+skips during cross-arch bootstrap, and it was doing native
+`Path.symlink_to()` / `Path.parent.mkdir()` against the
+root-owned sudo-mounted partition — the lone module function
+that didn't honor the same privilege model as the rest of the
+file.
+
+Fix: probe `os.access(root_mnt, os.W_OK)` once. Writable
+(root-in-LXC or test owning a tmp tree) → keep the fast native
+path. Non-writable → batch every mkdir/ln into one
+`sudo sh -c '...'` invocation (one shell-out for all ~300
+applets, not 300 per-symlink sudos). Reads stay native either
+way.
+
+Regression test
+`test_install_busybox_symlinks_routes_through_sudo_when_mount_unwritable`
+fakes the non-root case (monkeypatched `os.access` + recorder
+on `imgxz._sudo`) and asserts exactly one batched call —
+catches both "must use _sudo" and "must batch".
+
+Audited the rest of `alpine_ext4.py` — other native writes
+(`cache.mkdir`, `shutil.copy2` for alpine-keys extraction,
+output-path parent mkdir) all operate on user-owned cache_dir
+/ output paths, not on the sudo-mounted partition. No other
+offenders.
 
 ## v0.6.5 — 2026-05-31 — Raspbian PXE backend (NFS-root)
 
