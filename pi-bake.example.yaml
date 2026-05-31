@@ -54,30 +54,52 @@ output:
 #   - debian: "12.7-arm64"
 # os_version: 3.21.4
 
-# OS layout (Alpine only). Default `diskless` (the v0.0+ Alpine RPi
-# tarball shape — apkovl overlay + modloop squashfs on FAT, no-root
-# bake). Options:
-#   - diskless (default): SD card boot, no sudo, fast first-boot.
-#   - ext4 (v0.3.1+): sys-mode Alpine on a real partitioned image
+# OS layout. Per-OS allow-list:
+#   alpine: diskless (default), ext4, pxe
+#   raspbian: "" (SD-card default), pxe
+#   debian/fedora: layout fixed by backend; os_mode must be empty.
+# Options in detail:
+#   - diskless (alpine, default): SD card boot, no sudo, fast first-boot.
+#   - ext4 (alpine, v0.3.1+): sys-mode Alpine on a real partitioned image
 #     (FAT /boot + ext4 /); requires sudo. Only mode that supports
 #     `os_version: edge` — diskless rejects it because Alpine ships
 #     no RPi edge tarball and modloop-on-FAT makes post-boot kernel
 #     upgrade an awkward ritual.
-#   - pxe (v0.3.2+): produces a TFTP+HTTP boot tree (a directory,
+#   - pxe (alpine, v0.3.2+): produces a TFTP+HTTP boot tree (a directory,
 #     not an .img file) for network-boot recovery. No-sudo bake.
 #     Operator drops the tree into /var/lib/tftpboot/<mac>/ on the
 #     lab host; the same tree gets served over HTTP via nginx (see
 #     ngnix_setup.md). Requires `pxe.server_url:` to be set.
-# Ignored for non-Alpine backends.
+#   - pxe (raspbian, v0.6.5+): two-tarball NFS-root bake — a TFTP
+#     tarball (kernel + DTBs + initramfs + cmdline.txt) and a rootfs
+#     tarball (customized Pi OS Lite /). Requires `pxe.nfs_server:`.
+#     See examples/pi-cm4-raspbian-pxe.yaml for the full shape.
 # os_mode: ext4
 
-# PXE-mode lab HTTP base URL. Required when os_mode: pxe. pi-bake
-# substitutes this into cmdline.txt's `apkovl=` and `alpine_repo=`
-# params. Must NOT include the apks/<arch> suffix — apk appends
-# `/<arch>/APKINDEX.tar.gz` itself. See examples/pi-cm4-alpine-pxe.yaml
-# for a complete pxe-mode recipe.
+# PXE-mode block. Required when os_mode: pxe — fields are per-os.
+#
+# Alpine PXE: only server_url applies (apkovl + apks served by nginx).
+# pi-bake substitutes server_url into cmdline.txt's `apkovl=` and
+# `alpine_repo=` params. Must NOT include the apks/<arch> suffix —
+# apk appends `/<arch>/APKINDEX.tar.gz` itself. See
+# examples/pi-cm4-alpine-pxe.yaml.
+#
+# Raspbian PXE: nfs_server is required; nfs_mount_options and
+# nfs_push are optional. See examples/pi-cm4-raspbian-pxe.yaml.
+#   - nfs_server: <host>[:<port>]:<path> — NFS export the Pi mounts
+#     as rootfs. Port is optional (defaults to standard 2049).
+#   - nfs_mount_options: extras appended to cmdline.txt's nfsroot=
+#     (e.g. "vers=3,proto=tcp,mountport=8803,nolock" — common when
+#     pointing at unfs3 behind an incus port-forward proxy).
+#   - nfs_push: OPTIONAL deploy hint. pi-bake never auto-pushes,
+#     but if set, DEPLOY.md gets the matching command pre-filled:
+#       incus:<container-name>     → `incus file push ...`
+#       ssh://<user>@<host>:<port> → `scp ...`
 # pxe:
-#   server_url: http://192.168.4.2/cm4-lab
+#   server_url: http://192.168.4.2/cm4-lab           # alpine only
+#   nfs_server: 192.168.4.2:8801:/srv/nfs/pi-bake/cm4-pxe   # raspbian only
+#   nfs_mount_options: vers=3,proto=tcp,mountport=8803,nolock  # raspbian
+#   nfs_push: incus:nfs-pi-bake                      # raspbian, optional
 
 # IANA timezone. Default UTC. Some clocks (Pi has no RTC) come up
 # at 1970-01-01 anyway until chrony syncs — this is only the

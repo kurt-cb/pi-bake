@@ -19,6 +19,7 @@ for the tag-time checklist.
 
 | Version | Date | Headline |
 |---|---|---|
+| [v0.6.5](#v065--2026-05-31--raspbian-pxe-backend-nfs-root) | 2026-05-31 | Raspbian PXE backend (`os_mode: pxe` for Raspbian) — two-tarball NFS-root deploy with all customization done at bake time |
 | [v0.6.2](#v062--2026-05-30--cm-board-catalog--example-cleanup--raspbian-bugfixes) | 2026-05-30 | pi-cm3/cm4/cm5 catalog entries + example hostname cleanup + raspbian.py bugfixes from v0.6.1 |
 | [v0.6.1](#v061--2026-05-29--multi-user-with-per-user-key-fallback) | 2026-05-29 | Multi-user via `users:` plural with per-user ssh_pubkey fallback to top-level |
 | [v0.6.0](#v060--2026-05-29--named-user--dtparam-shortcuts) | 2026-05-29 | Named user replaces default `pi` + generic `dtparam:` config.txt shortcuts |
@@ -43,6 +44,50 @@ for the tag-time checklist.
 | [v0.0.1](#v001--2026-05-23--first-real-hardware-shape) | 2026-05-23 | Static IP + time sync + WiFi firmware + RTC-less boot survival |
 
 ---
+
+## v0.6.5 — 2026-05-31 — Raspbian PXE backend (NFS-root)
+
+Pi OS Lite (Raspbian) joins Alpine in supporting `os_mode: pxe`
+([ROADMAP #27](ROADMAP.md#27-raspbian-pxe-backend-os_mode-pxe-for-raspbian)).
+Where Alpine PXE works because the stock Alpine RPi initramfs natively
+fetches `apkovl=URL` over HTTP, Pi OS has no such hook — its initramfs
+expects a local-disk PARTUUID rootfs. So Raspbian PXE goes the other
+common Pi-PXE route: **NFS-rootfs boot**, kernel-supplied via
+`ip=dhcp root=/dev/nfs nfsroot=<server>:<path>` in cmdline.txt.
+
+The bake produces a directory containing two tarballs:
+
+- **`<host>-tftp.tar.gz`** (~50 MB) — bootcode + kernel + DTBs +
+  initramfs + cmdline.txt + minimal config.txt. Goes into the lab
+  host's TFTP root keyed by the Pi's MAC.
+- **`<host>-rootfs.tar.gz`** (~600 MB) — customized Pi OS Lite /,
+  ready to extract into the NFS export the kernel will mount.
+- **`DEPLOY.md`** — operator hint sheet pre-filled with the matching
+  `incus file push` or `scp` invocation when the recipe specifies
+  `pxe.nfs_push:`, plus the A/B-NFS pattern recommendation (modifying
+  the slot the Pi has actively mounted causes stale-handle errors).
+
+Every customization runs at bake time — there is no
+`firstrun.sh` equivalent, since TFTP's cmdline.txt and the
+NFS-served rootfs's cmdline.txt are separate files. The bake
+masks 11 services that break NFS-root (notably
+`NetworkManager`, `dhcpcd`, `init_resize2fs_once`,
+`regenerate_ssh_host_keys`, `dphys-swapfile`,
+`rpi-eeprom-update`, `userconfig`+`userconf-pi`), strips
+PARTUUID lines from `/etc/fstab`, enables `ssh.socket` and
+`getty@tty1` explicitly, overrides `default.target` to
+`multi-user`, bakes the operator's SSH host keys and user
+account directly into `/etc/passwd`/`/etc/shadow`/`/etc/group`
++ `/home/<user>/.ssh/authorized_keys`, and writes a minimal
+`config.txt` (no `camera_auto_detect` / `display_auto_detect`
+/ `dtparam=audio` — those mailbox calls fail on netboot).
+
+Validated 2026-05-30 on a CM4 (88:a2:9e:44:31:f3 →
+unfs3-in-incus). Clean single boot, no reboot loops, no
+post-boot surgery. Example recipe:
+[`examples/pi-cm4-raspbian-pxe.yaml`](examples/pi-cm4-raspbian-pxe.yaml).
+Standing up the NFS server itself is **out of scope** for
+pi-bake — every lab does it differently.
 
 ## v0.6.2 — 2026-05-30 — CM board catalog + example cleanup + raspbian bugfixes
 

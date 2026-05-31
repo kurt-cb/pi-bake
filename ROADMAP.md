@@ -32,11 +32,9 @@ versions get assigned at tag time, not here.
 | 24 |  ✅   | [Raspbian backend: per-codename baker classes](#24-raspbian-backend-per-codename-baker-classes) |
 | 25 |  ⬜   | [EEPROM rescue SD image (`pi-bake rescue`)](#25-eeprom-rescue-sd-image-pi-bake-rescue) |
 | 26 |  ⬜   | [Display info-screen (HDMI / SPI / I2C)](#26-display-info-screen-hdmi--spi--i2c) |
-| 27 |  🟡   | [Raspbian PXE backend (`os_mode: pxe` for Raspbian)](#27-raspbian-pxe-backend-os_mode-pxe-for-raspbian) |
+| 27 |  ✅   | [Raspbian PXE backend (`os_mode: pxe` for Raspbian)](#27-raspbian-pxe-backend-os_mode-pxe-for-raspbian) |
 
 **State key:** ✅ shipped · 🟡 partial (code in, hardware verification or extra step pending) · 🚧 in flight · 🔴 blocked (on another item) · ⬜ not started · ⏸ deferred (won't pick up without more signal) · ❌ dead-ended (deliberately abandoned)
-
-**#27 note:** marked 🟡 because the full v0.7.0 spec is captured + end-to-end hardware-validated on a CM4 (NFS-root + sshd + console all up), but the validation was hand-assembled from a standard Raspbian `.img.xz` plus the conversion documented in the body. The proper `raspbian_pxe.py` backend implementation is the remaining step.
 
 ---
 
@@ -1106,7 +1104,9 @@ validate against.
 ---
 
 ## 27. Raspbian PXE backend (`os_mode: pxe` for Raspbian)
-**📋 planned — design only**
+**✅ shipped (v0.6.5)**
+
+Implemented at [`src/pi_bake/raspbian_pxe.py`](src/pi_bake/raspbian_pxe.py); the v0.7.0 NFS-root spec below is now the live behavior of `pi-bake build --config examples/pi-cm4-raspbian-pxe.yaml`. The 2026-05-30 CM4 hand-validation entry in [`tested_bakes.yaml`](tested_bakes.yaml) is what each module-level transform (service-mask list, config.txt strip, fstab PARTUUID strip, ssh.socket activation, getty@tty1 enable, default.target=multi-user, pre-baked SSH host keys, hostname baked direct) was derived from. Standing up the NFS server itself remains out of pi-bake's scope.
 
 Alpine PXE shipped in v0.3.2 (ROADMAP #20) because the stock
 Alpine RPi initramfs natively understands `apkovl=URL` +
