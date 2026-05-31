@@ -733,16 +733,41 @@ def _fallback_for_unknown_codename(unknown: str) -> str:
 def bake(
     *, url: str, node: NodeConfig, out_path: Path,
     image_size_mb: int = 0,
+    os_mode: str = "",
+    pxe_nfs_server: str = "",
+    pxe_nfs_mount_options: str = "",
+    pxe_nfs_push: str = "",
+    **_unused,  # absorb future bake kwargs without breaking
 ) -> Path:
-    """Bake a Raspberry Pi OS Lite .img.xz for `node`.
+    """Bake a Raspberry Pi OS Lite image for `node`.
 
-    Dispatches to the matching per-codename baker (Bookworm /
-    Trixie) by parsing the codename from the URL. Sudo is
-    required for losetup + mount steps.
+    Dispatches by `os_mode`:
+      - `pxe`: hand off to raspbian_pxe.bake() — produces two
+        tarballs (TFTP + NFS rootfs) + a DEPLOY.md hint.
+      - default (SD-card): produces a single .img.xz via the
+        per-codename baker (Bookworm or Trixie), determined by
+        the upstream URL.
+
+    Sudo is required for losetup + mount in either mode.
     """
+    if os_mode == "pxe":
+        from pi_bake import raspbian_pxe
+        if not pxe_nfs_server:
+            raise ValueError(
+                "os: raspbian + os_mode: pxe requires pxe.nfs_server "
+                "in the recipe (set via `pxe: nfs_server: ...` block)"
+            )
+        return raspbian_pxe.bake(
+            url=url, node=node, out_path=out_path,
+            pxe_nfs_server=pxe_nfs_server,
+            pxe_nfs_mount_options=pxe_nfs_mount_options,
+            pxe_nfs_push=pxe_nfs_push,
+            image_size_mb=image_size_mb,
+        )
+
     cn = _detect_codename(url)
     baker = _BAKERS[cn]
-    LOG.info("raspbian: dispatching to %s baker", cn)
+    LOG.info("raspbian: dispatching to %s baker (SD mode)", cn)
     return baker.bake(
         url=url, node=node, out_path=out_path,
         image_size_mb=image_size_mb,

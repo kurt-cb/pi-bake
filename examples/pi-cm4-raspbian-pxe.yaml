@@ -1,0 +1,83 @@
+# CM4 (aarch64) — Raspbian (Pi OS Lite) NFS-root via PXE/TFTP.
+# Two-tarball output (NOT an .img.gz).
+#
+# Output:
+#   ~/pibake-pxe/cm4-pxe/
+#     ├── cm4-pxe-tftp.tar.gz    (~50 MB: bootcode, kernel, DTBs,
+#     │                           initramfs, cmdline.txt, config.txt)
+#     ├── cm4-pxe-rootfs.tar.gz  (~600 MB: customized Pi OS Lite /)
+#     └── DEPLOY.md              (operator hint sheet for pushing
+#                                 each tarball to its destination)
+#
+# When to pick `os: raspbian` + `os_mode: pxe`:
+#   - You want Pi OS specifically (apt ecosystem, Pi-vendor support)
+#     but SD-less — typical for CM4 IO board lab setups.
+#   - You want fast iterate-and-reboot cycles: a fresh rootfs is one
+#     `tar -xzpf` away, no flash + insert + power cycle.
+#   - You need to inspect runtime state of a "running" Pi by reading
+#     the NFS export from the lab host directly.
+#
+# How the CM4 actually boots when both tarballs are deployed:
+#   1. Pi firmware (CM4 EEPROM, network-boot-first) DHCPs + downloads
+#      bootcode.bin, kernel*.img, *.dtb, overlays/, cmdline.txt,
+#      config.txt from TFTP server.
+#   2. Kernel boots with `ip=dhcp root=/dev/nfs nfsroot=<server>` from
+#      cmdline.txt. DHCP'd via kernel IP autoconfig (NOT initramfs
+#      DHCP — Pi OS Lite's stock initramfs doesn't ship one).
+#   3. Kernel mounts NFS export as /, switch_root, systemd starts.
+#   4. Bake-baked user (pi by default) is reachable via SSH using
+#      the operator's authorized_keys.
+#
+# Prereqs on the lab host (one-time — out of scope for pi-bake):
+#   - dnsmasq serving DHCP + TFTP on the lab subnet
+#   - An NFS-v3 server exporting the per-host rootfs path
+#   - CM4's EEPROM boot order set to network-first
+#
+# A/B-NFS pattern (recommended): two parallel exports per host
+# (e.g. /srv/nfs/pi-bake/cm4-pxe-a + /srv/nfs/pi-bake/cm4-pxe-b),
+# with a symlink the operator flips. Modifying the slot the Pi has
+# actively mounted causes stale handle errors. See DEPLOY.md
+# emitted alongside the tarballs.
+
+hostname: cm4-pxe
+board: pi-cm4
+os: raspbian
+os_mode: pxe
+os_version: bookworm
+
+ssh_pubkey: ~/.ssh/*.pub
+
+pxe:
+  # NFS export the Pi mounts as rootfs. Format: <host>[:<port>]:<path>
+  # Custom port (8801 here) is common when the lab host's NFS-v3
+  # server is behind a port-forwarding container proxy (incus's
+  # default unfs3 setup, see ngnix_setup.md). With stock nfsd:
+  #   nfs_server: 192.168.4.2:/srv/nfs/pi-bake/cm4-pxe
+  nfs_server: 192.168.4.2:8801:/srv/nfs/pi-bake/cm4-pxe
+
+  # Optional extras appended to cmdline.txt's `nfsroot=`. Tune for
+  # the server's actual NFS version/protocol. Required when the
+  # NFS server uses NFSv3 over a non-standard port (mountport must
+  # be set explicitly because no rpcbind):
+  nfs_mount_options: vers=3,proto=tcp,mountport=8803,nolock
+
+  # OPTIONAL deploy hint: pi-bake never auto-pushes, but it writes
+  # the recipe-appropriate `incus file push` / `scp` invocation
+  # into DEPLOY.md. Two forms:
+  #   nfs_push: incus:<container-name>
+  #   nfs_push: ssh://<user>@<host>:<port>
+  # Omit if you want only manual-deploy steps in DEPLOY.md.
+  nfs_push: incus:nfs-pi-bake
+
+# Kernel ip=dhcp comes from the cmdline.txt the backend writes;
+# the network: block doesn't affect the netboot path itself but is
+# recorded in the bake (Pi OS NetworkManager is masked at bake
+# time — kernel handles DHCP for the lifetime of the boot).
+network:
+  mode: dhcp
+  send_hostname: true
+
+output:
+  # Output is a DIRECTORY (not an .img.gz). Two .tar.gz tarballs +
+  # DEPLOY.md land inside.
+  path: ~/pibake-pxe/cm4-pxe

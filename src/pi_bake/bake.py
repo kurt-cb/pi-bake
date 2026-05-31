@@ -34,6 +34,9 @@ def build(
     extra_packages: list[str] | None = None,
     os_mode: str = "",
     pxe_server_url: str = "",
+    pxe_nfs_server: str = "",
+    pxe_nfs_mount_options: str = "",
+    pxe_nfs_push: str = "",
     apk_fetch: bool = True,  # DEPRECATED — always-on; kept for back-compat
 ) -> Path:
     """Build an `.img.gz` for `(board, os, version, node)`.
@@ -146,6 +149,10 @@ def build(
         return raspbian.bake(
             url=url, node=node, out_path=Path(out_path),
             image_size_mb=image_size_mb or 0,
+            os_mode=os_mode,
+            pxe_nfs_server=pxe_nfs_server,
+            pxe_nfs_mount_options=pxe_nfs_mount_options,
+            pxe_nfs_push=pxe_nfs_push,
         )
     elif backend == "debian":
         from pi_bake import debian
