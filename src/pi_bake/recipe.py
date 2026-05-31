@@ -97,13 +97,21 @@ def _stringify_dtparam_value(v: object) -> str:
     if v is False:
         return "off"
     return str(v)
-_PXE_KEYS = frozenset({"server_url"})
+_PXE_KEYS = frozenset({
+    "server_url",            # alpine PXE: HTTP base for apkovl + alpine_repo
+    "nfs_server",            # raspbian PXE: <host>:<port>:<path>
+    "nfs_mount_options",     # raspbian PXE: extra NFS mount options
+    "nfs_push",              # raspbian PXE: optional deploy-target SSH endpoint
+})
 
 # Valid os_mode values per os. Empty set = mode doesn't apply
 # (backend has only one layout). "" entry is the back-compat
 # default (= "diskless" for alpine).
 _VALID_OS_MODES: dict[str, frozenset[str]] = {
     "alpine": frozenset({"", "diskless", "ext4", "pxe"}),
+    # Raspbian SD-card path is the empty/back-compat default. "pxe"
+    # selects the NFS-root backend in raspbian_pxe.py (v0.6.5+).
+    "raspbian": frozenset({"", "pxe"}),
 }
 _NETWORK_KEYS = frozenset({"mode", "address", "gateway", "send_hostname"})
 _WIFI_KEYS    = frozenset({"ssid", "psk", "country"})
@@ -251,15 +259,42 @@ class UserSpec:
 class PxeSpec:
     """`os_mode: pxe`-specific recipe block.
 
+    ## Alpine PXE (ROADMAP #20)
+
     `server_url` — the base HTTP URL where the lab host serves the
     baked tree. Becomes the prefix for `apkovl=` and `alpine_repo=`
     in cmdline.txt. Example:
-        http://192.168.4.2/td-cm4
+        http://192.168.4.2/cm4-lab
 
     Trailing slash is stripped — pi-bake's cmdline templates always
     append the rest as `/<host>.apkovl.tar.gz` etc.
+
+    ## Raspbian PXE (ROADMAP #27, v0.6.5+)
+
+    `nfs_server` — where the Pi mounts its rootfs over NFS. Format:
+        <host>:<port>:<path>     (port optional, defaults to 2049)
+    Example for the operator-local unfs3-in-LXC container:
+        192.168.4.2:8801:/srv/nfs/pi-bake/cm4-pxe
+
+    Becomes the `nfsroot=` directive in cmdline.txt at bake time.
+
+    `nfs_mount_options` — extra options appended to nfsroot=. Tune
+    these to match the NFS server's capabilities. Common values:
+        vers=3,proto=tcp,mountport=8803,nolock    (unfs3 via incus proxy)
+        vers=4,proto=tcp                          (kernel-NFS on standard port)
+
+    `nfs_push` — OPTIONAL hint to the operator about how to push the
+    rootfs tarball after bake. Pi-bake prints this in the deploy
+    instructions; doesn't act on it. Format:
+        incus:<container-name>      (push via `incus file push`)
+        ssh://<user>@<host>:<port>  (push via scp)
+    Example:
+        incus:nfs-pi-bake
     """
     server_url: str = ""
+    nfs_server: str = ""
+    nfs_mount_options: str = ""
+    nfs_push: str = ""
 
     def __post_init__(self) -> None:
         if self.server_url and not self.server_url.startswith(
@@ -271,6 +306,14 @@ class PxeSpec:
             )
         # Strip trailing slash so templates concat predictably.
         self.server_url = self.server_url.rstrip("/")
+        # nfs_server format check: <host>[:<port>]:<path>
+        if self.nfs_server:
+            if ":" not in self.nfs_server or "/" not in self.nfs_server:
+                raise ValueError(
+                    f"pxe.nfs_server must be `<host>[:<port>]:<path>` "
+                    f"(e.g. 192.168.4.2:8801:/srv/nfs/pi-bake/cm4); "
+                    f"got {self.nfs_server!r}"
+                )
 
 
 @dataclass
@@ -422,19 +465,34 @@ class Recipe:
                     "upgrade require a manual ritual). "
                     "Use `os_mode: ext4` for edge kernel support."
                 )
-        # pxe mode requires pxe.server_url (the lab HTTP base URL).
-        # Validated here so a malformed recipe fails fast at load,
-        # not late in the bake when the cmdline.txt template fires.
-        if self.os_mode == "pxe" and not self.pxe.server_url:
+        # pxe mode requires backend-appropriate pxe.* fields.
+        # Alpine PXE: pxe.server_url (apkovl + apks via HTTP).
+        # Raspbian PXE: pxe.nfs_server (NFS-root mount endpoint).
+        if self.os_mode == "pxe":
+            if self.os == "alpine" and not self.pxe.server_url:
+                raise ValueError(
+                    "os: alpine + os_mode: pxe requires pxe.server_url — "
+                    "the base HTTP URL the lab host serves the baked tree "
+                    "at (e.g. http://192.168.4.2/<hostname>). pi-bake "
+                    "substitutes this into cmdline.txt's apkovl=... and "
+                    "alpine_repo=... params."
+                )
+            if self.os == "raspbian" and not self.pxe.nfs_server:
+                raise ValueError(
+                    "os: raspbian + os_mode: pxe requires pxe.nfs_server — "
+                    "the NFS endpoint the Pi mounts its rootfs from "
+                    "(e.g. 192.168.4.2:8801:/srv/nfs/pi-bake/<hostname>). "
+                    "pi-bake substitutes this into cmdline.txt's nfsroot= "
+                    "param."
+                )
+        # pxe.* fields shouldn't be set without os_mode: pxe — surface
+        # the misconfig at load rather than ignoring the values.
+        if self.os_mode != "pxe" and (
+            self.pxe.server_url or self.pxe.nfs_server
+            or self.pxe.nfs_mount_options or self.pxe.nfs_push
+        ):
             raise ValueError(
-                "os_mode: pxe requires pxe.server_url — the base HTTP URL "
-                "the lab host serves the baked tree at (e.g. "
-                "http://192.168.4.2/<hostname>). pi-bake substitutes this "
-                "into cmdline.txt's apkovl=... and alpine_repo=... params."
-            )
-        if self.os_mode != "pxe" and self.pxe.server_url:
-            raise ValueError(
-                "pxe.server_url set but os_mode is not pxe — pxe.* fields "
+                "pxe.* set but os_mode is not pxe — pxe.* fields "
                 "are only meaningful when os_mode: pxe."
             )
 
@@ -707,11 +765,18 @@ def dump_recipe(r: Recipe) -> str:
         lines.append("modules:")
         for m in r.modules:
             lines.append(f"  - {_yaml_str(m)}")
-    if r.pxe.server_url:
+    if r.pxe.server_url or r.pxe.nfs_server:
         lines.append("")
-        lines.append("# PXE-mode lab HTTP base URL (apkovl + alpine_repo target).")
+        lines.append("# PXE-mode backend-specific config (alpine: server_url, raspbian: nfs_*).")
         lines.append("pxe:")
-        lines.append(f"  server_url: {_yaml_str(r.pxe.server_url)}")
+        if r.pxe.server_url:
+            lines.append(f"  server_url: {_yaml_str(r.pxe.server_url)}")
+        if r.pxe.nfs_server:
+            lines.append(f"  nfs_server: {_yaml_str(r.pxe.nfs_server)}")
+        if r.pxe.nfs_mount_options:
+            lines.append(f"  nfs_mount_options: {_yaml_str(r.pxe.nfs_mount_options)}")
+        if r.pxe.nfs_push:
+            lines.append(f"  nfs_push: {_yaml_str(r.pxe.nfs_push)}")
     if r.dtparam:
         lines.append("")
         lines.append("# dtparam shortcuts — each becomes `dtparam=<key>=<value>` in config.txt.")
@@ -890,6 +955,12 @@ def recipe_to_node_config(r: Recipe):
         build_kwargs["image_size_mb"] = r.output.image_size_mb
     if r.pxe.server_url:
         build_kwargs["pxe_server_url"] = r.pxe.server_url
+    if r.pxe.nfs_server:
+        build_kwargs["pxe_nfs_server"] = r.pxe.nfs_server
+    if r.pxe.nfs_mount_options:
+        build_kwargs["pxe_nfs_mount_options"] = r.pxe.nfs_mount_options
+    if r.pxe.nfs_push:
+        build_kwargs["pxe_nfs_push"] = r.pxe.nfs_push
     return node, build_kwargs
 
 

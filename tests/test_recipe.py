@@ -566,6 +566,8 @@ def test_os_mode_invalid_value_rejected(tmp_path):
 
 
 def test_os_mode_rejected_for_non_alpine(tmp_path):
+    """raspbian only supports `pxe` (v0.6.5+); other modes like ext4
+    are alpine-only and surface a per-os allow-list error."""
     body = f"""
 hostname: x
 board: pi-5
@@ -575,8 +577,25 @@ ssh_pubkey: "{_PUBKEY}"
 output:
   path: /tmp/x.img.gz
 """
-    with pytest.raises(ValueError, match="os_mode is only meaningful"):
+    with pytest.raises(ValueError, match="not valid for os='raspbian'"):
         _write_and_load(tmp_path, body)
+
+
+def test_os_mode_rejected_for_debian_fedora(tmp_path):
+    """debian/fedora have no os_mode support yet — set any value and
+    the catch-all `only meaningful for os: alpine` error surfaces."""
+    for os_name in ("debian", "fedora"):
+        body = f"""
+hostname: x
+board: pi-5
+os: {os_name}
+os_mode: pxe
+ssh_pubkey: "{_PUBKEY}"
+output:
+  path: /tmp/x.img.gz
+"""
+        with pytest.raises(ValueError, match="only meaningful"):
+            _write_and_load(tmp_path, body)
 
 
 def test_edge_in_diskless_rejected(tmp_path):
@@ -727,6 +746,148 @@ def test_pxe_round_trip(tmp_path):
     p.write_text(dump_recipe(r1))
     r2 = load_recipe(p)
     assert r2 == r1
+
+
+# --------------------------------------------------------------------------- #
+# Raspbian PXE (NFS-root) — pxe.nfs_server etc. (v0.6.5+)                     #
+# --------------------------------------------------------------------------- #
+
+
+def _minimal_raspbian_pxe_yaml() -> str:
+    return f"""
+hostname: cm4-pxe
+board: pi-cm4
+os: raspbian
+os_mode: pxe
+ssh_pubkey: "{_PUBKEY}"
+pxe:
+  nfs_server: 192.168.4.2:8801:/srv/nfs/pi-bake/cm4-pxe
+output:
+  path: /tmp/cm4-pxe-bake
+"""
+
+
+def test_raspbian_pxe_loads_yaml(tmp_path):
+    r = _write_and_load(tmp_path, _minimal_raspbian_pxe_yaml())
+    assert r.os == "raspbian"
+    assert r.os_mode == "pxe"
+    assert r.pxe.nfs_server == "192.168.4.2:8801:/srv/nfs/pi-bake/cm4-pxe"
+
+
+def test_raspbian_pxe_requires_nfs_server(tmp_path):
+    """os: raspbian + os_mode: pxe with no pxe.nfs_server is a misconfig."""
+    body = f"""
+hostname: cm4-pxe
+board: pi-cm4
+os: raspbian
+os_mode: pxe
+ssh_pubkey: "{_PUBKEY}"
+output:
+  path: /tmp/cm4-pxe-bake
+"""
+    with pytest.raises(ValueError, match="nfs_server"):
+        _write_and_load(tmp_path, body)
+
+
+def test_raspbian_pxe_nfs_server_format_validated(tmp_path):
+    """`nfs_server` must look like `<host>[:<port>]:<path>`."""
+    body = f"""
+hostname: cm4-pxe
+board: pi-cm4
+os: raspbian
+os_mode: pxe
+ssh_pubkey: "{_PUBKEY}"
+pxe:
+  nfs_server: nope-no-path
+output:
+  path: /tmp/cm4-pxe-bake
+"""
+    with pytest.raises(ValueError, match="<host>"):
+        _write_and_load(tmp_path, body)
+
+
+def test_raspbian_pxe_accepts_optional_mount_options_and_push(tmp_path):
+    body = f"""
+hostname: cm4-pxe
+board: pi-cm4
+os: raspbian
+os_mode: pxe
+ssh_pubkey: "{_PUBKEY}"
+pxe:
+  nfs_server: 192.168.4.2:8801:/srv/nfs/pi-bake/cm4-pxe
+  nfs_mount_options: vers=3,proto=tcp,mountport=8803,nolock
+  nfs_push: incus:nfs-pi-bake
+output:
+  path: /tmp/cm4-pxe-bake
+"""
+    r = _write_and_load(tmp_path, body)
+    assert r.pxe.nfs_mount_options.startswith("vers=3")
+    assert r.pxe.nfs_push == "incus:nfs-pi-bake"
+
+
+def test_raspbian_pxe_threaded_to_build_kwargs():
+    from pi_bake.recipe import PxeSpec
+    r = Recipe(
+        hostname="cm4-pxe", board="pi-cm4", os="raspbian",
+        os_mode="pxe",
+        pxe=PxeSpec(
+            nfs_server="192.168.4.2:8801:/srv/nfs/pi-bake/cm4-pxe",
+            nfs_mount_options="vers=3,nolock",
+            nfs_push="incus:nfs-pi-bake",
+        ),
+        ssh_pubkey=_PUBKEY,
+        output=OutputSpec(path="/tmp/cm4-pxe-bake"),
+    )
+    _, build_kwargs = recipe_to_node_config(r)
+    assert build_kwargs.get("os_mode") == "pxe"
+    assert build_kwargs.get("pxe_nfs_server").startswith("192.168.4.2:8801")
+    assert build_kwargs.get("pxe_nfs_mount_options") == "vers=3,nolock"
+    assert build_kwargs.get("pxe_nfs_push") == "incus:nfs-pi-bake"
+
+
+def test_raspbian_pxe_round_trip(tmp_path):
+    from pi_bake.recipe import PxeSpec
+    r1 = Recipe(
+        hostname="cm4-pxe", board="pi-cm4", os="raspbian",
+        os_mode="pxe",
+        pxe=PxeSpec(
+            nfs_server="192.168.4.2:8801:/srv/nfs/pi-bake/cm4-pxe",
+            nfs_mount_options="vers=3,proto=tcp,mountport=8803,nolock",
+            nfs_push="incus:nfs-pi-bake",
+        ),
+        ssh_pubkey=_PUBKEY,
+        output=OutputSpec(path="/tmp/cm4-pxe-bake"),
+    )
+    p = tmp_path / "raspbian-pxe.yaml"
+    p.write_text(dump_recipe(r1))
+    r2 = load_recipe(p)
+    assert r2 == r1
+
+
+def test_raspbian_pxe_rejects_nfs_fields_without_pxe_mode(tmp_path):
+    body = f"""
+hostname: cm4-sd
+board: pi-cm4
+os: raspbian
+ssh_pubkey: "{_PUBKEY}"
+pxe:
+  nfs_server: 192.168.4.2:8801:/srv/nfs/cm4
+output:
+  path: /tmp/cm4-sd.img.gz
+"""
+    with pytest.raises(ValueError, match="only meaningful"):
+        _write_and_load(tmp_path, body)
+
+
+def test_raspbian_with_sd_mode_unaffected():
+    """Default os_mode (SD) for raspbian still works — no regression."""
+    r = Recipe(
+        hostname="t", board="pi-5", os="raspbian",
+        ssh_pubkey=_PUBKEY,
+        output=OutputSpec(path="/tmp/x.img.gz"),
+    )
+    assert r.os_mode == ""
+    assert r.pxe.nfs_server == ""
 
 
 # --------------------------------------------------------------------------- #
