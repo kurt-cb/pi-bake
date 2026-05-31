@@ -5,6 +5,118 @@ tags via `./scripts/release-notes.sh`. To add notes for
 a new release, tag the commit with
 `git tag -a vX.Y.Z -m "..."` and re-run this script.
 
+## v0.6.5 — 2026-05-31
+
+Pi OS Lite (Raspbian) joins Alpine in supporting `os_mode: pxe`
+(ROADMAP #27). Where Alpine PXE works because the stock Alpine
+RPi initramfs natively fetches `apkovl=URL` over HTTP, Pi OS
+has no such hook — its initramfs expects a local-disk PARTUUID
+rootfs. Raspbian PXE goes the other common Pi-PXE route:
+NFS-rootfs boot, kernel-supplied via cmdline.txt's
+`ip=dhcp root=/dev/nfs nfsroot=<server>:<path>`.
+
+New module src/pi_bake/raspbian_pxe.py — module-level bake()
+dispatched from raspbian.py when os_mode==pxe. The bake
+produces a directory containing two tarballs + a deploy hint:
+
+  - <host>-tftp.tar.gz   (~50 MB)  — bootcode + kernel + DTBs +
+                                     initramfs + cmdline.txt +
+                                     minimal config.txt
+  - <host>-rootfs.tar.gz (~600 MB) — customized Pi OS Lite /
+  - DEPLOY.md                       — pre-filled deploy commands
+                                     when pxe.nfs_push: is set,
+                                     plus the A/B-NFS hint
+
+Schema additions (PxeSpec, src/pi_bake/recipe.py):
+
+  pxe:
+    nfs_server: <host>[:<port>]:<path>    # required
+    nfs_mount_options: vers=3,proto=tcp,mountport=8803,nolock
+    nfs_push: incus:nfs-pi-bake           # optional; or ssh://…
+
+`os_mode: pxe` is now valid for `os: raspbian` (was alpine-only).
+
+Every transform runs at bake time — there is no firstrun.sh
+equivalent, because TFTP's cmdline.txt and the NFS rootfs's
+cmdline.txt are separate files (firstrun.sh would only affect
+the SD-card path, not the netboot path).
+
+Service mask list (11 services that break NFS-root in some way):
+  - NetworkManager / NetworkManager-wait-online / dhcpcd —
+    fight the kernel's ip=dhcp NFS-root mount.
+  - regenerate_ssh_host_keys — would wipe our pre-baked keys.
+  - init_resize2fs_once — tries to resize a non-existent SD.
+  - dphys-swapfile — swap file on slow NFS = bad.
+  - rpi-eeprom-update — firmware-mailbox probe fails on netboot.
+  - userconfig / userconf-pi — interactive first-boot wizards.
+  - sshswitch — redundant when ssh.service is enabled directly.
+  - udisks2 — graphical-target leftover.
+
+Filesystem transforms:
+  - /etc/fstab PARTUUID lines commented (NFS-root has no
+    PARTUUIDs to mount).
+  - /etc/systemd/system/default.target → multi-user.target
+    (Pi OS Lite Bookworm defaults to graphical).
+  - ssh.socket + ssh.service enabled (Bookworm uses socket
+    activation; just the service is insufficient).
+  - getty@tty1 enabled explicitly (Pi OS has it disabled).
+  - /etc/ssh/sshd_config.d/rename_user.conf removed (Banner
+    refs userconf-pi which is masked).
+  - /etc/sshd_config gets a `UseDNS no` snippet (faster login
+    on slow-DNS lab networks).
+
+User account (no firstrun.sh — baked direct):
+  - /etc/passwd / /etc/shadow / /etc/group entries created
+    inline for the operator's user (defaults to `pi` with the
+    standard Pi OS group set).
+  - /home/<user>/.ssh/authorized_keys written with mode 0600.
+  - sha-512 crypt password hash set (Pi OS sshd refuses
+    truly-empty password fields even with key-only auth).
+
+SSH host keys: pre-generated at bake time (ed25519 by default,
+or operator-supplied via `ssh_host_key:`).
+
+config.txt: minimal — `arm_64bit=1 / auto_initramfs=0 /
+enable_uart=1` only. No `camera_auto_detect /
+display_auto_detect / dtparam=audio / dtoverlay=vc4-kms-v3d` —
+those Pi-firmware-mailbox property calls fail or hang on a
+netbooting CM4.
+
+2026-05-30: CM4 (88:a2:9e:44:31:f3) PXE-boots Pi OS Bookworm
+via TFTP kernel + NFS-root mount from unfs3 in unprivileged
+LXC container. Clean single boot, no reboot loops, no manual
+post-boot surgery. Captured in tested_bakes.yaml as
+`os_mode: pxe` (was `pxe-design-validation` in v0.6.2).
+
+    pi-bake build --config examples/pi-cm4-raspbian-pxe.yaml
+
+Output: ~/pibake-pxe/cm4-pxe/{tftp.tar.gz, rootfs.tar.gz,
+DEPLOY.md}. DEPLOY.md has the matching `incus file push` or
+`scp` invocation pre-filled when pxe.nfs_push: is set.
+
+Standing up an NFS server itself is out of pi-bake's scope —
+every lab does it differently (bare-metal nfsd, LXC unfs3,
+NAS appliance, existing infrastructure). pi-bake's contract
+stops at the two-tarball bake + the deploy hint.
+
+Two parallel NFS exports per host (cm4-pxe-a + cm4-pxe-b)
+with a symlink the operator flips between deploys. Modifying
+the slot the Pi has actively mounted causes stale-handle
+errors — learned the hard way during the 2026-05-30 validation.
+
+309 passed, 1 skipped (was 284 + 1). 25 new tests:
+  - tests/test_recipe.py: 8 new (PxeSpec raspbian fields,
+    validation, round-trip, build-kwargs threading).
+  - tests/test_raspbian_pxe.py: 16 new (service-mask
+    completeness, cmdline content, config.txt strip,
+    bake-direct user logic, DEPLOY.md emission).
+  - test_os_mode_rejected_for_non_alpine: format update +
+    new test_os_mode_rejected_for_debian_fedora split out.
+
+  recipe: extend PxeSpec for raspbian PXE (nfs_server, …)
+  raspbian_pxe: NFS-root PXE backend (os_mode: pxe for Raspbian)
+  docs: v0.6.5 — Raspbian PXE backend shipped
+
 ## v0.6.2 — 2026-05-30
 
 Patch release driven by end-to-end Raspbian PXE NFS-root
