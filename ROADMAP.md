@@ -26,8 +26,17 @@ versions get assigned at tag time, not here.
 | 18 |  ⏸   | [Secure boot (verified boot chain — opt-in for stronger threat models)](#18-secure-boot) |
 | 19 |  ✅   | [Alpine ext4 (sys-mode) backend (`os_mode: ext4`)](#19-alpine-ext4-sys-mode-backend) |
 | 20 |  ✅   | [Alpine PXE backend (`os_mode: pxe`)](#20-alpine-pxe-backend) |
+| 21 |  ✅   | [Deterministic SSH host keys from a seed (`ssh_host_key: usehost` / `seed:...`)](#21-deterministic-ssh-host-keys-from-a-seed-ssh_host_key-usehost--seed) |
+| 22 |  ✅   | [`os_version:` selection across all backends (`stable` / `latest` / dated)](#22-os_version-selection-across-all-backends-stable--latest--dated) |
+| 23 |  ✅   | [Raspbian `firstrun.sh` first-boot mechanism (replaces marker race)](#23-raspbian-firstrunsh-first-boot-mechanism-replaces-marker-race) |
+| 24 |  ✅   | [Raspbian backend: per-codename baker classes](#24-raspbian-backend-per-codename-baker-classes) |
+| 25 |  ⬜   | [EEPROM rescue SD image (`pi-bake rescue`)](#25-eeprom-rescue-sd-image-pi-bake-rescue) |
+| 26 |  ⬜   | [Display info-screen (HDMI / SPI / I2C)](#26-display-info-screen-hdmi--spi--i2c) |
+| 27 |  🟡   | [Raspbian PXE backend (`os_mode: pxe` for Raspbian)](#27-raspbian-pxe-backend-os_mode-pxe-for-raspbian) |
 
 **State key:** ✅ shipped · 🟡 partial (code in, hardware verification or extra step pending) · 🚧 in flight · 🔴 blocked (on another item) · ⬜ not started · ⏸ deferred (won't pick up without more signal) · ❌ dead-ended (deliberately abandoned)
+
+**#27 note:** marked 🟡 because the full v0.7.0 spec is captured + end-to-end hardware-validated on a CM4 (NFS-root + sshd + console all up), but the validation was hand-assembled from a standard Raspbian `.img.xz` plus the conversion documented in the body. The proper `raspbian_pxe.py` backend implementation is the remaining step.
 
 ---
 
